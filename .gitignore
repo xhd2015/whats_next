@@ -1,0 +1,47 @@
+.DS_Store
+.vscode
+.idea
+
+*.log
+*.bin
+*.a
+*.exe
+# the xgo binary
+/xgo
+/xgo.exe
+/test/xgo
+/test/xgo.exe
+
+/*.log
+
+/tools/compile-devel
+/tools/compile
+/tools/build-cache
+
+/go-release
+/xgo-release
+
+# generated traces
+/runtime/test/**/*.json
+/runtime/test/build/legacy_depend_vendor/vendor
+/test/**/*.json
+
+# coverage
+/covers
+cover*.out
+
+/tmp
+
+debug-compile.json
+
+# not required packed modules
+/cmd/xgo/internal/vendir/github.com/xhd2015/go-coverage/diff/vscode/node_modules
+
+
+/cmd/xgo/internal/src/vendor
+**/.xgo/gen
+
+__debug_bin*
+
+cover.out
+**/.xgo/gen
