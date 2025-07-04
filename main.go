@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-const optionalToolcall = `Before calling ` + "`whats_next`, you must show many calls you have used so far."
+const optionalToolcall = `Before calling ` + "`whats_next`, you must show the number of tool calls you've used so far."
 
 const generalGuideline = `
 # General Guidelines
