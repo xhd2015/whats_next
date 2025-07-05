@@ -4,9 +4,12 @@ import (
 	"bufio"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"time"
+
+	"github.com/xhd2015/less-gen/flags"
 )
 
 const optionalToolcall = `Before calling ` + "`whats_next`, you must show the number of tool calls you've used so far."
@@ -118,9 +121,15 @@ var USE_BACKSLAHS = false
 func handleWhatsNext(args []string) error {
 	if len(args) > 0 {
 		cmd := args[0]
-		if cmd == "show" {
+		switch cmd {
+		case "show":
 			return show(args[1:])
+		case "add":
+			return add(args[1:])
+		default:
+			return fmt.Errorf("unrecognized command: %s", cmd)
 		}
+
 	}
 	// wait for user input
 
@@ -242,5 +251,94 @@ func show(args []string) error {
 
 	fmt.Println(strings.TrimPrefix(dumpPrompt, "\n"))
 
+	customFile, err := getCustomFile(false)
+	if err != nil {
+		return err
+	}
+	custom, readErr := os.ReadFile(customFile)
+	if readErr != nil {
+		if !os.IsNotExist(readErr) {
+			return readErr
+		}
+	}
+	if len(custom) > 0 {
+		fmt.Printf("---- from: %s ----\n", customFile)
+		fmt.Println(string(custom))
+	}
+
 	return nil
+}
+
+const addHelp = `
+whats_next add [content]
+
+Options:
+  --title TITLE
+
+`
+
+func add(args []string) error {
+	var title string
+	args, readErr := flags.String("--title", &title).
+		Help("-h,--help", addHelp).
+		Parse(args)
+	if readErr != nil {
+		return readErr
+	}
+	if len(args) == 0 {
+		return fmt.Errorf("requires content")
+	}
+	content := args[0]
+	content = strings.TrimSpace(content)
+	if content == "" {
+		return fmt.Errorf("requires non-empty content")
+	}
+	args = args[1:]
+
+	if len(args) > 0 {
+		return fmt.Errorf("unrecognized extra arguments: %v", strings.Join(args, ","))
+	}
+
+	customFile, readErr := getCustomFile(true)
+	if readErr != nil {
+		return readErr
+	}
+
+	custom, readErr := os.ReadFile(customFile)
+	if readErr != nil {
+		if !os.IsNotExist(readErr) {
+			return readErr
+		}
+	}
+
+	if title != "" {
+		if !strings.HasPrefix(title, "# ") {
+			title = "# " + title
+		}
+		custom = append(custom, []byte(title)...)
+		custom = append(custom, []byte("\n")...)
+	}
+
+	custom = append(custom, []byte(content)...)
+	custom = append(custom, []byte("\n")...)
+
+	if err := os.WriteFile(customFile, custom, 0644); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func getCustomFile(createDir bool) (string, error) {
+	conf, err := os.UserConfigDir()
+	if err != nil {
+		return "", err
+	}
+	configDir := filepath.Join(conf, "whats_next")
+	if createDir {
+		if err := os.MkdirAll(configDir, 0755); err != nil {
+			return "", err
+		}
+	}
+	return filepath.Join(configDir, "custom.md"), nil
 }
