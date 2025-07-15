@@ -115,6 +115,10 @@ Commands:
   show
   edit
   add
+
+  list
+  use
+
   group
 
 Sub commands for group:
@@ -150,9 +154,21 @@ func handleWhatsNext(args []string) error {
 		cmd := args[0]
 		switch cmd {
 		case "show":
-			return show(args[1:])
+			showArgs := args[1:]
+			if len(showArgs) > 0 && !strings.HasPrefix(showArgs[0], "-") {
+				return group(append([]string{"show"}, showArgs...))
+			}
+			return show(showArgs)
 		case "edit":
+			editArgs := args[1:]
+			if len(editArgs) > 0 && !strings.HasPrefix(editArgs[0], "-") {
+				return group(append([]string{"edit"}, editArgs...))
+			}
 			return edit(args[1:])
+		case "use":
+			return group(append([]string{"use"}, args[1:]...))
+		case "list":
+			return group(append([]string{"list"}, args[1:]...))
 		case "add":
 			return add(args[1:])
 		case "group":
@@ -362,7 +378,17 @@ func group(args []string) error {
 		if err != nil {
 			return err
 		}
+		var selectedProfile string
+		config, err := readConfig()
+		if err == nil && config.SelectedProfile != "" {
+			selectedProfile = config.SelectedProfile
+		}
+
 		for _, name := range names {
+			// print an extra * if a name is being used
+			if name == selectedProfile {
+				fmt.Print("* ")
+			}
 			fmt.Println(name)
 		}
 		return nil
