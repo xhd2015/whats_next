@@ -115,6 +115,7 @@ Commands:
   show
   edit
   add
+  where
 
   list
   use
@@ -171,8 +172,12 @@ func handleWhatsNext(args []string) error {
 			return group(append([]string{"list"}, args[1:]...))
 		case "add":
 			return add(args[1:])
+		case "where":
+			return where(args[1:])
 		case "group":
 			return group(args[1:])
+		case "--help", "help":
+			return handleHelp(args[1:])
 		default:
 			return fmt.Errorf("unrecognized command: %s", cmd)
 		}
@@ -470,6 +475,11 @@ func group(args []string) error {
 	}
 }
 
+func handleHelp(args []string) error {
+	fmt.Print(strings.TrimPrefix(help, "\n"))
+	return nil
+}
+
 func groupShow(use bool, args []string) error {
 	groupDir, err := getConfigPath(false, "group")
 	if err != nil {
@@ -486,7 +496,17 @@ func groupShow(use bool, args []string) error {
 	if readErr != nil {
 		return readErr
 	}
-	fmt.Print(string(group))
+
+	// Filter content based on project paths if using the profile
+	if use {
+		filteredContent, err := filterContentByProject(string(group))
+		if err != nil {
+			return err
+		}
+		fmt.Print(filteredContent)
+	} else {
+		fmt.Print(string(group))
+	}
 
 	if use {
 		// Save selected profile to config
@@ -503,6 +523,7 @@ func groupShow(use bool, args []string) error {
 	}
 	return nil
 }
+
 func addMDSuffix(name string) string {
 	if strings.HasSuffix(name, ".md") {
 		return name
@@ -636,6 +657,20 @@ func add(args []string) error {
 		return err
 	}
 
+	return nil
+}
+
+func where(args []string) error {
+	if len(args) > 0 {
+		return fmt.Errorf("where command does not accept arguments")
+	}
+
+	configDir, err := getConfigDir(false)
+	if err != nil {
+		return err
+	}
+
+	fmt.Println(configDir)
 	return nil
 }
 
