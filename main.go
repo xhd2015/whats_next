@@ -149,8 +149,9 @@ func main() {
 // tested: 2m works fine,
 // tested: 3m works fine
 // let's try 3m
-// var TIMEOUT = 3 * time.Minute
-var TIMEOUT = 5 * time.Second // for testing
+var TIMEOUT = 3 * time.Minute
+
+// var TIMEOUT = 5 * time.Second // for testing
 
 var USE_BACKSLAHS = false
 
