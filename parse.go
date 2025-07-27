@@ -69,12 +69,16 @@ func filterContentByProject(content string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	filteredContent := filterContentByDir(content, cwd)
+	return filteredContent, nil
+}
 
+func filterContentByDir(content string, dir string) string {
 	sections := parseSections(content)
 	var filteredSections []Section
 
 	for _, section := range sections {
-		if shouldIncludeSection(section.Title, cwd) {
+		if shouldIncludeSection(section.Title, dir) {
 			filteredSections = append(filteredSections, section)
 		}
 	}
@@ -88,7 +92,7 @@ func filterContentByProject(content string) (string, error) {
 		}
 	}
 
-	return strings.Join(result, "\n"), nil
+	return strings.Join(result, "\n")
 }
 
 // shouldIncludeSection checks if a section heading should be included
