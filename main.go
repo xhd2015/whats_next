@@ -265,7 +265,7 @@ func handleWhatsNext(args []string) error {
 			<-done
 			fmt.Println("The user is thinking, please execute `whats_next` again.")
 			fmt.Println()
-			fmt.Print(generalGuideline)
+			printlnContent(generalGuideline)
 			return nil
 		}
 		// wait forever for done
@@ -328,11 +328,24 @@ func showW(w io.Writer) error {
 }
 
 func edit(args []string) error {
+	var editor string
+	args, err := flags.String("--editor", &editor).
+		Parse(args)
+	if err != nil {
+		return err
+	}
+	if len(args) > 0 {
+		return fmt.Errorf("unrecognized extra args: %s", strings.Join(args, ","))
+	}
 	file, err := getCustomFile(true)
 	if err != nil {
 		return err
 	}
-	return cmd.Debug().Run("code", file)
+	openCmd := "code"
+	if editor != "" {
+		openCmd = editor
+	}
+	return cmd.Debug().Run(openCmd, file)
 }
 
 func group(args []string) error {
@@ -379,6 +392,11 @@ func group(args []string) error {
 		}
 		return nil
 	case "edit":
+		var editor string
+		args, err := flags.String("--editor", &editor).Parse(args)
+		if err != nil {
+			return err
+		}
 		groupDir, err := getConfigPath(true, "group")
 		if err != nil {
 			return err
@@ -410,7 +428,11 @@ func group(args []string) error {
 		if stat != nil && stat.IsDir() {
 			return fmt.Errorf("group config is a dir, not a file: %s", groupFile)
 		}
-		return cmd.Debug().Run("code", groupFile)
+		openCmd := "code"
+		if editor != "" {
+			openCmd = editor
+		}
+		return cmd.Debug().Run(openCmd, groupFile)
 	case "rename", "mv":
 		if len(args) != 2 {
 			return fmt.Errorf("requires old name and new name")
@@ -484,9 +506,9 @@ func groupShow(use bool, args []string) error {
 		if err != nil {
 			return err
 		}
-		fmt.Print(filteredContent)
+		printlnContent(filteredContent)
 	} else {
-		fmt.Print(string(group))
+		printlnContent(string(group))
 	}
 
 	if use {
@@ -510,6 +532,13 @@ func addMDSuffix(name string) string {
 		return name
 	}
 	return name + ".md"
+}
+
+func printlnContent(content string) {
+	fmt.Print(content)
+	if !strings.HasSuffix(content, "\n") {
+		fmt.Println()
+	}
 }
 
 func selectGroupName(groupDir string, args []string) (string, error) {
