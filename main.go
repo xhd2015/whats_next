@@ -181,6 +181,8 @@ func handleWhatsNext(args []string) error {
 			return add(args[1:])
 		case "where":
 			return where(args[1:])
+		case "config":
+			return handleConfig(args[1:])
 		case "group":
 			return group(args[1:])
 		case "--help", "help":
