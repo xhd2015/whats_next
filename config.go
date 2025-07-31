@@ -7,6 +7,7 @@ import (
 
 // Config represents the configuration stored in config.json
 type Config struct {
+	Editor          string `json:"editor"`
 	SelectedProfile string `json:"selectedProfile"`
 }
 

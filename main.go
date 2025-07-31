@@ -120,8 +120,10 @@ Commands:
 
   list
   use
-
   group
+
+Options:
+  --editor EDITOR
 
 Sub commands for group:
   list
@@ -341,10 +343,7 @@ func edit(args []string) error {
 	if err != nil {
 		return err
 	}
-	openCmd := "code"
-	if editor != "" {
-		openCmd = editor
-	}
+	openCmd := getEditor(editor)
 	return cmd.Debug().Run(openCmd, file)
 }
 
@@ -428,10 +427,7 @@ func group(args []string) error {
 		if stat != nil && stat.IsDir() {
 			return fmt.Errorf("group config is a dir, not a file: %s", groupFile)
 		}
-		openCmd := "code"
-		if editor != "" {
-			openCmd = editor
-		}
+		openCmd := getEditor(editor)
 		return cmd.Debug().Run(openCmd, groupFile)
 	case "rename", "mv":
 		if len(args) != 2 {
@@ -476,6 +472,22 @@ func group(args []string) error {
 	default:
 		return fmt.Errorf("unrecognized %s", groupCmd)
 	}
+}
+
+func getEditor(editor string) string {
+	if editor != "" {
+		return editor
+	}
+
+	// read config
+	config, err := readConfig()
+	if err != nil {
+		return "code"
+	}
+	if config.Editor != "" {
+		return config.Editor
+	}
+	return "code"
 }
 
 func handleHelp(args []string) error {
