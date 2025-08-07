@@ -245,7 +245,7 @@ func handleWhatsNext(args []string) error {
 					printContent := string(profileContent)
 					cwd, _ := os.Getwd()
 					if cwd != "" {
-						printContent = filterContentByDir(printContent, cwd)
+						printContent = filterContentByDir(printContent, cwd, isCursor())
 					}
 					fmt.Println(printContent)
 				}

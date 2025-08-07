@@ -64,21 +64,30 @@ func parseSections(content string) []Section {
 // filterContentByProject filters markdown content to only show sections
 // that match the current working directory when the section title contains
 // a project path specification like "# Some title(project: /path/to/project)"
+// (cursor-only)
 func filterContentByProject(content string) (string, error) {
 	cwd, err := os.Getwd()
 	if err != nil {
 		return "", err
 	}
-	filteredContent := filterContentByDir(content, cwd)
+	filteredContent := filterContentByDir(content, cwd, isCursor())
 	return filteredContent, nil
 }
 
-func filterContentByDir(content string, dir string) string {
+func isCursor() bool {
+	claudeCodeEnv := os.Getenv("CLAUDECODE")
+	if claudeCodeEnv == "1" || claudeCodeEnv == "true" {
+		return false
+	}
+	return true
+}
+
+func filterContentByDir(content string, dir string, isCursor bool) string {
 	sections := parseSections(content)
 	var filteredSections []Section
 
 	for _, section := range sections {
-		if shouldIncludeSection(section.Title, dir) {
+		if shouldIncludeSection(section.Title, dir, isCursor) {
 			filteredSections = append(filteredSections, section)
 		}
 	}
@@ -96,8 +105,12 @@ func filterContentByDir(content string, dir string) string {
 }
 
 // shouldIncludeSection checks if a section heading should be included
-// based on project path matching
-func shouldIncludeSection(heading, cwd string) bool {
+// based on project path matching and cursor-only directive
+func shouldIncludeSection(heading, cwd string, isCursor bool) bool {
+	// Check for (cursor-only) directive
+	if hasCursorOnlyDirective(heading) && !isCursor {
+		return false
+	}
 	// Look for pattern like "(project: /path/to/project)"
 	projectStart := strings.Index(heading, "(project:")
 	if projectStart == -1 {
@@ -159,4 +172,35 @@ func shouldIncludeSection(heading, cwd string) bool {
 // containsGlobPattern checks if a path contains glob pattern characters
 func containsGlobPattern(path string) bool {
 	return strings.ContainsAny(path, "*?[]{}")
+}
+
+// hasCursorOnlyDirective checks if a heading contains the (cursor-only) directive
+// Handles arbitrary whitespace and multiple directives
+func hasCursorOnlyDirective(heading string) bool {
+	// Look for pattern like "(cursor-only)" with potential whitespace
+	start := 0
+	for {
+		parenStart := strings.Index(heading[start:], "(")
+		if parenStart == -1 {
+			break
+		}
+		parenStart += start
+		
+		parenEnd := strings.Index(heading[parenStart:], ")")
+		if parenEnd == -1 {
+			break
+		}
+		parenEnd += parenStart
+		
+		// Extract content inside parentheses
+		content := heading[parenStart+1 : parenEnd]
+		// Trim whitespace and check if it contains "cursor-only"
+		trimmedContent := strings.TrimSpace(content)
+		if strings.Contains(trimmedContent, "cursor-only") {
+			return true
+		}
+		
+		start = parenEnd + 1
+	}
+	return false
 }
