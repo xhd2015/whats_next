@@ -221,7 +221,7 @@ func TestShouldIncludeSection(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := shouldIncludeSection(tt.heading, tt.cwd)
+			result, _, _, _ := shouldIncludeSection(tt.heading, tt.cwd, true)
 			if result != tt.expected {
 				t.Errorf("Expected %v, got %v for heading %q with cwd %q", tt.expected, result, tt.heading, tt.cwd)
 			}

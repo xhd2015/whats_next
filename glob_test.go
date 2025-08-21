@@ -198,7 +198,7 @@ func TestShouldIncludeSectionWithGlob(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := shouldIncludeSection(tt.heading, tt.cwd)
+			result, _, _, _ := shouldIncludeSection(tt.heading, tt.cwd, true)
 			if result != tt.expected {
 				t.Errorf("shouldIncludeSection(%q, %q) = %v, expected %v", tt.heading, tt.cwd, result, tt.expected)
 			}
@@ -345,7 +345,7 @@ func TestShouldIncludeSectionWithExpandedPaths(t *testing.T) {
 				tt.setup()
 			}
 
-			result := shouldIncludeSection(tt.heading, tt.cwd)
+			result, _, _, _ := shouldIncludeSection(tt.heading, tt.cwd, true)
 			if result != tt.expected {
 				t.Errorf("shouldIncludeSection(%q, %q) = %v, expected %v", tt.heading, tt.cwd, result, tt.expected)
 			}
