@@ -7,17 +7,23 @@ import (
 	"os"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/charmbracelet/bubbles/textarea"
 	tea "github.com/charmbracelet/bubbletea"
 )
 
 type multiLineEditorModel struct {
-	textarea  textarea.Model
-	finished  bool
-	cancelled bool
-	content   string
-	hasInput  *int32
+	textarea    textarea.Model
+	finished    bool
+	cancelled   bool
+	content     string
+	hasInput    *int32
+	startTime   time.Time
+	timeout     time.Duration
+	showTimer   bool
+	frozenTime  time.Duration // Time remaining when user first typed
+	timerFrozen bool          // Whether timer is frozen due to user input
 }
 
 type multiLineMsg struct {
@@ -25,14 +31,43 @@ type multiLineMsg struct {
 	exit    bool
 }
 
+type timerTickMsg time.Time
+
 func (m multiLineEditorModel) Init() tea.Cmd {
+	if m.showTimer {
+		return tea.Batch(textarea.Blink, timerTick())
+	}
 	return textarea.Blink
+}
+
+func timerTick() tea.Cmd {
+	return tea.Tick(time.Second, func(t time.Time) tea.Msg {
+		return timerTickMsg(t)
+	})
 }
 
 func (m multiLineEditorModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 
 	switch msg := msg.(type) {
+	case timerTickMsg:
+		if m.showTimer && atomic.LoadInt32(m.hasInput) == 0 {
+			elapsed := time.Since(m.startTime)
+			if elapsed >= m.timeout {
+				// Timeout reached
+				m.cancelled = true
+				return m, tea.Quit
+			}
+			// Continue ticking
+			return m, timerTick()
+		}
+		// Freeze timer if user has input
+		if atomic.LoadInt32(m.hasInput) > 0 && !m.timerFrozen {
+			elapsed := time.Since(m.startTime)
+			m.frozenTime = m.timeout - elapsed
+			m.timerFrozen = true
+		}
+		return m, nil
 	case tea.KeyMsg:
 		// Set hasInput when user types any content (except control keys that don't add content)
 		switch msg.Type {
@@ -130,8 +165,34 @@ func (m multiLineEditorModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m multiLineEditorModel) View() string {
+	var userPrompt string
+	if m.showTimer {
+		var remaining time.Duration
+		if m.timerFrozen {
+			// Show frozen time when user has typed
+			remaining = m.frozenTime
+		} else if atomic.LoadInt32(m.hasInput) == 0 {
+			// Show live countdown when user hasn't typed
+			elapsed := time.Since(m.startTime)
+			remaining = m.timeout - elapsed
+		} else {
+			// Fallback case
+			userPrompt = "user> "
+		}
+
+		if remaining > 0 {
+			minutes := int(remaining.Minutes())
+			seconds := int(remaining.Seconds()) % 60
+			userPrompt = fmt.Sprintf("user (%dm %02ds)> ", minutes, seconds)
+		} else {
+			userPrompt = "user> "
+		}
+	} else {
+		userPrompt = "user> "
+	}
+
 	helpText := "\n\nType 'END'(Ctrl+S) to submit • Type 'CLEAR'(Ctrl+D) to reset • Type 'exit'(esc) to quit"
-	return fmt.Sprintf("user> \n%s%s", m.textarea.View(), helpText)
+	return fmt.Sprintf("%s\n%s%s", userPrompt, m.textarea.View(), helpText)
 }
 
 // readInputFromTerminal reads multiline input from terminal with rich editing capabilities.
@@ -141,7 +202,8 @@ func (m multiLineEditorModel) View() string {
 // - Support multiline input without overlay (works in chat terminals)
 // - Support special commands: END (submit), CLEAR (reset), exit (quit)
 // - Must work inline in terminal, not as vim-like overlay
-func readInputFromTerminal(ctx context.Context, hasInput *int32) ([]string, error) {
+
+func readInputFromTerminal(ctx context.Context, hasInput *int32, timeout time.Duration, showTimer bool) ([]string, error) {
 	ta := textarea.New()
 	ta.Placeholder = "Type your message here... (multi-line supported)"
 	ta.Focus()
@@ -151,8 +213,11 @@ func readInputFromTerminal(ctx context.Context, hasInput *int32) ([]string, erro
 	ta.ShowLineNumbers = false
 
 	model := multiLineEditorModel{
-		textarea: ta,
-		hasInput: hasInput,
+		textarea:  ta,
+		hasInput:  hasInput,
+		startTime: time.Now(),
+		timeout:   timeout,
+		showTimer: showTimer,
 	}
 
 	// Use WITHOUT AltScreen to work inline in terminal

@@ -157,6 +157,8 @@ var USE_BACKSLAHS = false
 
 const FORCE_NON_TERMINAL = false
 
+const DISABLE_TIMER = false
+
 func handleWhatsNext(args []string) error {
 	if len(args) > 0 {
 		cmd := args[0]
@@ -213,7 +215,7 @@ func handleWhatsNext(args []string) error {
 		var err error
 
 		if isTerminal && !FORCE_NON_TERMINAL {
-			lines, err = readInputFromTerminal(ctx, &hasInput)
+			lines, err = readInputFromTerminal(ctx, &hasInput, TIMEOUT, !DISABLE_TIMER)
 		} else {
 			lines, err = readInputFromNonTerminal(&hasInput)
 		}
@@ -275,6 +277,8 @@ func handleWhatsNext(args []string) error {
 		// wait forever for done
 		<-done
 	case result := <-done:
+		// Cancel context to stop timer when input is received
+		cancel()
 		if result.Error != nil {
 			return result.Error
 		}
