@@ -10,10 +10,19 @@ import (
 	"github.com/xhd2015/xgo/support/cmd"
 )
 
+// Mode represents the operation mode
+type Mode string
+
+const (
+	ModeNative Mode = "native"
+	ModeServer Mode = "server"
+)
+
 // Config represents the configuration stored in config.json
 type Config struct {
 	Editor          string `json:"editor"`
 	SelectedProfile string `json:"selectedProfile"`
+	Mode            Mode   `json:"mode"`
 }
 
 const configHelp = `

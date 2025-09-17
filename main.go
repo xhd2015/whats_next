@@ -2,14 +2,12 @@ package main
 
 import (
 	"bufio"
-	"context"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"github.com/xhd2015/less-gen/flags"
@@ -135,7 +133,7 @@ Sub commands for group:
 `
 
 func main() {
-	err := handleWhatsNext(os.Args[1:])
+	err := handleCommands(os.Args[1:])
 	if err != nil {
 		fmt.Println(err)
 		os.Exit(1)
@@ -159,7 +157,7 @@ const FORCE_NON_TERMINAL = false
 
 const DISABLE_TIMER = false
 
-func handleWhatsNext(args []string) error {
+func handleCommands(args []string) error {
 	if len(args) > 0 {
 		cmd := args[0]
 		switch cmd {
@@ -187,105 +185,15 @@ func handleWhatsNext(args []string) error {
 			return handleConfig(args[1:])
 		case "group":
 			return group(args[1:])
+		case "serve":
+			return handleServe(args[1:])
 		case "--help", "help":
 			return handleHelp(args[1:])
 		default:
 			return fmt.Errorf("unrecognized command: %s", cmd)
 		}
-
 	}
-	// wait for user input
-
-	type Result struct {
-		Error error
-	}
-	done := make(chan Result)
-
-	var hasInput int32
-
-	// Create context for timeout cancellation
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	go func() {
-		// Check if stdin is a terminal for enhanced editing
-		isTerminal := term.IsTerminal(int(os.Stdin.Fd()))
-
-		var lines []string
-		var err error
-
-		if isTerminal && !FORCE_NON_TERMINAL {
-			lines, err = readInputFromTerminal(ctx, &hasInput, TIMEOUT, !DISABLE_TIMER)
-		} else {
-			lines, err = readInputFromNonTerminal(&hasInput)
-		}
-
-		if err != nil {
-			if err.Error() == "exit" {
-				fmt.Println("exit")
-				done <- Result{}
-				return
-			}
-			done <- Result{Error: err}
-			return
-		}
-		q := strings.Join(lines, "\n")
-		fmt.Printf("the user is asking: \n<question>\n%s\n</question>\nplease think step by step and give your answer\n", q)
-
-		fmt.Println("----")
-
-		var printSelectedProfile bool
-		// Check for selected profile and print its content
-		config, err := readConfig()
-		if err == nil && config.SelectedProfile != "" {
-			groupDir, err := getGroupConfigPath(false)
-			if err == nil {
-				profileName := addMDSuffix(config.SelectedProfile)
-				groupFile := filepath.Join(groupDir, profileName)
-				if profileContent, readErr := os.ReadFile(groupFile); readErr == nil {
-					printSelectedProfile = true
-					printContent := string(profileContent)
-					cwd, _ := os.Getwd()
-					if cwd != "" {
-						printContent = filterContentByDir(printContent, cwd, isCursor())
-					}
-					fmt.Println(printContent)
-				}
-			}
-		}
-		if !printSelectedProfile {
-			fmt.Print(generalGuideline)
-			fmt.Print(toolCallAwareness)
-			fmt.Print(runningCommand)
-		}
-
-		done <- Result{}
-	}()
-
-	select {
-	case <-time.After(TIMEOUT):
-		if atomic.LoadInt32(&hasInput) == 0 {
-			// Cancel the context to gracefully quit any running terminal program
-			cancel()
-			// Wait for the goroutine to finish after cancellation
-			<-done
-			fmt.Println("The user is thinking, please execute `whats_next` again.")
-			fmt.Println()
-			printlnContent(generalGuideline)
-			return nil
-		}
-		// wait forever for done
-		<-done
-	case result := <-done:
-		// Cancel context to stop timer when input is received
-		cancel()
-		if result.Error != nil {
-			return result.Error
-		}
-		return nil
-	}
-
-	return nil
+	return handleWhatsNext(args)
 }
 
 func show(args []string) error {
@@ -524,9 +432,9 @@ func groupShow(use bool, args []string) error {
 		if err != nil {
 			return err
 		}
-		printlnContent(filteredContent)
+		printlnContent(os.Stdout, filteredContent)
 	} else {
-		printlnContent(string(group))
+		printlnContent(os.Stdout, string(group))
 	}
 
 	if use {
@@ -552,10 +460,10 @@ func addMDSuffix(name string) string {
 	return name + ".md"
 }
 
-func printlnContent(content string) {
-	fmt.Print(content)
+func printlnContent(w io.Writer, content string) {
+	fmt.Fprint(w, content)
 	if !strings.HasSuffix(content, "\n") {
-		fmt.Println()
+		fmt.Fprintln(w)
 	}
 }
 
