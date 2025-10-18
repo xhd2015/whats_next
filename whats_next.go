@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"io"
@@ -9,11 +10,47 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	"golang.org/x/term"
 )
+
+// StagedInput holds input that was typed while waiting for clients
+type StagedInput struct {
+	mu         sync.RWMutex
+	data       []byte
+	hasInput   bool
+	activeConn bool // Track if there's an active connection
+}
+
+func (s *StagedInput) Append(bytes []byte) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.data = append(s.data, bytes...)
+	s.hasInput = true
+}
+
+func (s *StagedInput) GetAndClear() []byte {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	content := s.data
+	s.data = nil
+	return content
+}
+
+func (s *StagedInput) SetActiveConnection(active bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.activeConn = active
+}
+
+func (s *StagedInput) IsActiveConnection() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.activeConn
+}
 
 func handleWhatsNext(args []string) error {
 	// Check config for mode
@@ -27,10 +64,10 @@ func handleWhatsNext(args []string) error {
 		return handleWhatsNextInServerMode(args)
 	}
 	wd, _ := os.Getwd()
-	return acceptInput(os.Stdout, wd)
+	return acceptInput(os.Stdout, wd, "")
 }
 
-func acceptInput(w io.Writer, workingDir string) error {
+func acceptInput(w io.Writer, workingDir string, initialContent string) error {
 	// Default to native mode (current logic)
 	// wait for user input
 	type Result struct {
@@ -52,7 +89,7 @@ func acceptInput(w io.Writer, workingDir string) error {
 		var err error
 
 		if isTerminal && !FORCE_NON_TERMINAL {
-			lines, err = readInputFromTerminal(ctx, &hasInput, TIMEOUT, !DISABLE_TIMER)
+			lines, err = readInputFromTerminal(ctx, &hasInput, TIMEOUT, !DISABLE_TIMER, initialContent)
 		} else {
 			lines, err = readInputFromNonTerminal(&hasInput)
 		}
@@ -148,23 +185,69 @@ func handleWhatsNextInServerMode(args []string) error {
 	return nil
 }
 
+// acceptStagingInput collects input with "(staging) > " prompt for server mode
+func acceptStagingInput(stagedInput *StagedInput) {
+	for {
+		fmt.Print("(staging) > ")
+		reader := bufio.NewReader(os.Stdin)
+		for {
+			if stagedInput.IsActiveConnection() {
+				time.Sleep(100 * time.Millisecond)
+				continue
+			}
+			r, _, err := reader.ReadRune() // read a rune
+			if err != nil {
+				panic(fmt.Errorf("error reading stdin: %v", err))
+			}
+			if stagedInput.IsActiveConnection() {
+				time.Sleep(100 * time.Millisecond)
+				continue
+			}
+			stagedInput.Append([]byte(string(r)))
+			fmt.Print(string(r))
+		}
+	}
+}
+
 func handleServe(args []string) error {
+	stagedInput := &StagedInput{}
+
+	// Start staging input goroutine
+	go func() {
+		time.Sleep(500 * time.Millisecond)
+		acceptStagingInput(stagedInput)
+	}()
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		// When client makes a request, show the input prompt on server side (just like current terminal behavior)
 		fmt.Println("Client connected")
+
+		// Set active connection to disable staging input
+		stagedInput.SetActiveConnection(true)
+		defer func() {
+			// Re-enable staging input when client disconnects
+			stagedInput.SetActiveConnection(false)
+			fmt.Println("Client finished")
+			fmt.Print("staging > ")
+		}()
+
 		workingDir := r.URL.Query().Get("workingDir")
 
 		w.Header().Set("Content-Type", "text/plain")
-		err := acceptInput(w, workingDir)
+
+		// Check if we have staged input to use as initial content
+		stagedData := stagedInput.GetAndClear()
+		initialContent := string(stagedData)
+
+		// Use acceptInput with initial content (empty string if no staged input)
+		err := acceptInput(w, workingDir, initialContent)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			fmt.Println("Error:", err)
-		} else {
-			fmt.Println("Client finished")
+			return
 		}
 	})
 
 	fmt.Println("Starting server on port 7654...")
-	fmt.Println("Server will show input prompt when clients connect...")
+	fmt.Println("You can type input while waiting for clients. It will be staged and used when a client connects.")
+	fmt.Println("Type 'exit' to stop the server.")
 	return http.ListenAndServe(":7654", nil)
 }
