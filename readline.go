@@ -203,7 +203,7 @@ func (m multiLineEditorModel) View() string {
 // - Support special commands: END (submit), CLEAR (reset), exit (quit)
 // - Must work inline in terminal, not as vim-like overlay
 
-func readInputFromTerminal(ctx context.Context, hasInput *int32, timeout time.Duration, showTimer bool, initialContent string) ([]string, error) {
+func readInputFromTerminal(ctx context.Context, hasInput *int32, timeout time.Duration, showTimer bool) ([]string, error) {
 	ta := textarea.New()
 	ta.Placeholder = "Type your message here... (multi-line supported)"
 	ta.Focus()
@@ -211,11 +211,6 @@ func readInputFromTerminal(ctx context.Context, hasInput *int32, timeout time.Du
 	ta.SetWidth(80)
 	ta.SetHeight(4)
 	ta.ShowLineNumbers = false
-
-	// Set initial content if provided
-	if initialContent != "" {
-		ta.SetValue(initialContent)
-	}
 
 	model := multiLineEditorModel{
 		textarea:  ta,
