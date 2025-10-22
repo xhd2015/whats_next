@@ -24,11 +24,8 @@ type multiLineEditorModel struct {
 	showTimer   bool
 	frozenTime  time.Duration // Time remaining when user first typed
 	timerFrozen bool          // Whether timer is frozen due to user input
-}
 
-type multiLineMsg struct {
-	content string
-	exit    bool
+	getContentAfterUser func() string
 }
 
 type timerTickMsg time.Time
@@ -183,7 +180,12 @@ func (m multiLineEditorModel) View() string {
 		if remaining > 0 {
 			minutes := int(remaining.Minutes())
 			seconds := int(remaining.Seconds()) % 60
-			userPrompt = fmt.Sprintf("user (%dm %02ds)> ", minutes, seconds)
+
+			var extraContent string
+			if m.getContentAfterUser != nil {
+				extraContent = m.getContentAfterUser()
+			}
+			userPrompt = fmt.Sprintf("user (%dm %02ds)> %s", minutes, seconds, extraContent)
 		} else {
 			userPrompt = "user> "
 		}
@@ -203,7 +205,7 @@ func (m multiLineEditorModel) View() string {
 // - Support special commands: END (submit), CLEAR (reset), exit (quit)
 // - Must work inline in terminal, not as vim-like overlay
 
-func readInputFromTerminal(ctx context.Context, hasInput *int32, timeout time.Duration, showTimer bool) ([]string, error) {
+func readInputFromTerminal(ctx context.Context, hasInput *int32, timeout time.Duration, showTimer bool, getContentAfterUser func() string) ([]string, error) {
 	ta := textarea.New()
 	ta.Placeholder = "Type your message here... (multi-line supported)"
 	ta.Focus()
@@ -213,11 +215,12 @@ func readInputFromTerminal(ctx context.Context, hasInput *int32, timeout time.Du
 	ta.ShowLineNumbers = false
 
 	model := multiLineEditorModel{
-		textarea:  ta,
-		hasInput:  hasInput,
-		startTime: time.Now(),
-		timeout:   timeout,
-		showTimer: showTimer,
+		textarea:            ta,
+		hasInput:            hasInput,
+		startTime:           time.Now(),
+		timeout:             timeout,
+		showTimer:           showTimer,
+		getContentAfterUser: getContentAfterUser,
 	}
 
 	// Use WITHOUT AltScreen to work inline in terminal
