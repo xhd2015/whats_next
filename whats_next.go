@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/xhd2015/less-gen/flags"
 	"golang.org/x/term"
 )
@@ -21,8 +22,6 @@ const (
 	SERVER_PORT = 7654
 )
 
-var clientConn int64
-
 // Global state for background input handling
 type InputMessage struct {
 	Content    string
@@ -30,12 +29,60 @@ type InputMessage struct {
 	Error      error
 }
 
-var (
+type serveHandler struct {
+	mutex       sync.Mutex
 	inputChan   chan InputMessage
-	inputOnce   sync.Once
 	inputCtx    context.Context
 	inputCancel context.CancelFunc
-)
+
+	clientConn int64
+	program    *tea.Program
+}
+
+func (h *serveHandler) hasProcessingClient() bool {
+	return atomic.LoadInt64(&h.clientConn) > 0
+}
+
+func (h *serveHandler) setProgram(program *tea.Program) {
+	h.mutex.Lock()
+	defer h.mutex.Unlock()
+	h.program = program
+
+	if program != nil {
+		if h.clientConn == 0 {
+			go program.Send(disableTimerMsg{})
+		} else {
+			go program.Send(enableTimerMsg{})
+		}
+	}
+}
+
+func (h *serveHandler) notifyRequestAccepted() {
+	h.mutex.Lock()
+	defer h.mutex.Unlock()
+
+	h.clientConn++
+
+	if h.program == nil {
+		return
+	}
+	// send message to enable timer
+	h.program.Send(enableTimerMsg{})
+}
+
+func (h *serveHandler) notifyRequestFinished() {
+	h.mutex.Lock()
+	defer h.mutex.Unlock()
+
+	h.clientConn--
+
+	if h.program == nil {
+		return
+	}
+	if h.clientConn == 0 {
+		h.program.Send(disableTimerMsg{})
+	}
+}
 
 func handleWhatsNext(args []string) error {
 	// Check config for mode
@@ -49,10 +96,12 @@ func handleWhatsNext(args []string) error {
 		return handleWhatsNextInServerMode(args)
 	}
 	wd, _ := os.Getwd()
-	return acceptInput(os.Stdout, wd, nil)
+	return createInput(os.Stdout, wd, readTerminalOptions{
+		showTimer: true,
+	})
 }
 
-func acceptInput(w io.Writer, workingDir string, getContentAfterUser func() string) error {
+func createInput(w io.Writer, workingDir string, opts readTerminalOptions) error {
 	// Default to native mode (current logic)
 	// wait for user input
 	type Result struct {
@@ -73,8 +122,8 @@ func acceptInput(w io.Writer, workingDir string, getContentAfterUser func() stri
 		var lines []string
 		var err error
 
-		if isTerminal && !FORCE_NON_TERMINAL {
-			lines, err = readInputFromTerminal(ctx, &hasInput, TIMEOUT, !DISABLE_TIMER, getContentAfterUser)
+		if isTerminal {
+			lines, err = readInputFromTerminal(ctx, &hasInput, TIMEOUT, opts)
 		} else {
 			lines, err = readInputFromNonTerminal(&hasInput)
 		}
@@ -171,28 +220,29 @@ func handleWhatsNextInServerMode(args []string) error {
 }
 
 // startBackgroundInputLoop starts a background goroutine that continuously reads user input
-func startBackgroundInputLoop() {
-	inputOnce.Do(func() {
-		inputChan = make(chan InputMessage, 1) // Buffered to prevent blocking
-		inputCtx, inputCancel = context.WithCancel(context.Background())
+func startBackgroundInputLoop(h *serveHandler) {
+	h.inputChan = make(chan InputMessage, 1) // Buffered to prevent blocking
+	h.inputCtx, h.inputCancel = context.WithCancel(context.Background())
 
-		go func() {
-			defer close(inputChan)
+	go func() {
+		defer close(h.inputChan)
 
-			for {
-				select {
-				case <-inputCtx.Done():
-					return
-				default:
-					// Get current working directory for context
-					wd, _ := os.Getwd()
+		for {
+			select {
+			case <-h.inputCtx.Done():
+				return
+			default:
+				// Get current working directory for context
+				wd, _ := os.Getwd()
 
-					Logf("Waiting for input...")
+				Logf("Waiting for input...")
 
-					// Read input using the existing acceptInput logic
-					var content strings.Builder
-					err := acceptInput(&content, wd, func() string {
-						conn := atomic.LoadInt64(&clientConn)
+				// Read input using the existing acceptInput logic
+				var content strings.Builder
+				err := createInput(&content, wd, readTerminalOptions{
+					showTimer: h.hasProcessingClient(),
+					getContentAfterUser: func() string {
+						conn := atomic.LoadInt64(&h.clientConn)
 						if conn == 0 {
 							return "(staging)"
 						}
@@ -200,31 +250,39 @@ func startBackgroundInputLoop() {
 							return "(client connected)"
 						}
 						return fmt.Sprintf("(%d clients connected)", conn)
-					})
+					},
+					onCreatedProgram: func(program *tea.Program) {
+						Logf("program created")
+						h.setProgram(program)
+					},
+					onProgramFinished: func(program *tea.Program) {
+						Logf("program finished")
+						h.setProgram(nil)
+					},
+				})
 
-					msg := InputMessage{
-						Content:    content.String(),
-						WorkingDir: wd,
-						Error:      err,
-					}
+				msg := InputMessage{
+					Content:    content.String(),
+					WorkingDir: wd,
+					Error:      err,
+				}
 
-					// Send the input to the channel (non-blocking)
-					select {
-					case inputChan <- msg:
-						Logf("Input captured and ready for clients")
-					case <-inputCtx.Done():
-						return
-					}
+				// Send the input to the channel (non-blocking)
+				select {
+				case h.inputChan <- msg:
+					Logf("Input captured and ready for clients")
+				case <-h.inputCtx.Done():
+					return
 				}
 			}
-		}()
-	})
+		}
+	}()
 }
 
 // stopBackgroundInputLoop stops the background input goroutine
-func stopBackgroundInputLoop() {
-	if inputCancel != nil {
-		inputCancel()
+func stopBackgroundInputLoop(h *serveHandler) {
+	if h.inputCancel != nil {
+		h.inputCancel()
 	}
 }
 
@@ -245,94 +303,100 @@ func handleServe(args []string) error {
 		defer closeLoggers()
 	}
 
+	h := &serveHandler{}
+
 	// Start the background input loop
-	startBackgroundInputLoop()
+	startBackgroundInputLoop(h)
 
 	// Ensure cleanup on exit
-	defer stopBackgroundInputLoop()
+	defer stopBackgroundInputLoop(h)
 
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		atomic.AddInt64(&clientConn, 1)
-		defer atomic.AddInt64(&clientConn, -1)
+		h.notifyRequestAccepted()
+		defer h.notifyRequestFinished()
 
 		Logf("Client connected")
 		workingDir := r.URL.Query().Get("workingDir")
 
 		w.Header().Set("Content-Type", "text/plain")
 
-		// Wait for input from the background goroutine
-		select {
-		case msg, ok := <-inputChan:
-			if !ok {
-				http.Error(w, "Input channel closed", http.StatusInternalServerError)
-				Errorf("Input channel closed")
-				return
-			}
+		deadline := time.Now().Add(10 * time.Minute)
 
-			if msg.Error != nil {
-				if msg.Error.Error() == "exit" {
-					fmt.Fprint(w, "exit")
-					Logf("Client received exit command")
+		for {
+			// Wait for input from the background goroutine
+			select {
+			case msg, ok := <-h.inputChan:
+				if !ok {
+					http.Error(w, "Input channel closed", http.StatusInternalServerError)
+					Errorf("Input channel closed")
 					return
 				}
-				http.Error(w, msg.Error.Error(), http.StatusInternalServerError)
-				Errorf("Error: %v", msg.Error)
-				return
-			}
 
-			// Use the working directory from the client request if provided,
-			// otherwise use the one from the input message
-			finalWorkingDir := workingDir
-			if finalWorkingDir == "" {
-				finalWorkingDir = msg.WorkingDir
-			}
+				if msg.Error != nil {
+					if msg.Error.Error() == "exit" {
+						fmt.Fprint(w, "exit")
+						Logf("Client received exit command")
+						return
+					}
+					http.Error(w, msg.Error.Error(), http.StatusInternalServerError)
+					Errorf("Error: %v", msg.Error)
+					return
+				}
 
-			// Process the content and add the appropriate context
-			content := msg.Content
-			if content != "" {
-				// Extract the user question from the content if it follows the expected format
-				if strings.Contains(content, "<question>") {
-					fmt.Fprint(w, content)
-				} else {
-					// Format it as a question if it's raw input
-					fmt.Fprintf(w, "the user is asking: \n<question>\n%s\n</question>\nplease think step by step and give your answer\n", content)
-					fmt.Fprintln(w, "----")
+				// Use the working directory from the client request if provided,
+				// otherwise use the one from the input message
+				finalWorkingDir := workingDir
+				if finalWorkingDir == "" {
+					finalWorkingDir = msg.WorkingDir
+				}
 
-					// Add the guidelines and context
-					var printSelectedProfile bool
-					config, err := readConfig()
-					if err == nil && config.SelectedProfile != "" {
-						groupDir, err := getGroupConfigPath(false)
-						if err == nil {
-							profileName := addMDSuffix(config.SelectedProfile)
-							groupFile := filepath.Join(groupDir, profileName)
-							if profileContent, readErr := os.ReadFile(groupFile); readErr == nil {
-								printSelectedProfile = true
-								printContent := string(profileContent)
-								if finalWorkingDir != "" {
-									printContent = filterContentByDir(printContent, finalWorkingDir, isCursor())
+				// Process the content and add the appropriate context
+				content := msg.Content
+				if content != "" {
+					// Extract the user question from the content if it follows the expected format
+					if strings.Contains(content, "<question>") {
+						fmt.Fprint(w, content)
+					} else {
+						// Format it as a question if it's raw input
+						fmt.Fprintf(w, "the user is asking: \n<question>\n%s\n</question>\nplease think step by step and give your answer\n", content)
+						fmt.Fprintln(w, "----")
+
+						// Add the guidelines and context
+						var printSelectedProfile bool
+						config, err := readConfig()
+						if err == nil && config.SelectedProfile != "" {
+							groupDir, err := getGroupConfigPath(false)
+							if err == nil {
+								profileName := addMDSuffix(config.SelectedProfile)
+								groupFile := filepath.Join(groupDir, profileName)
+								if profileContent, readErr := os.ReadFile(groupFile); readErr == nil {
+									printSelectedProfile = true
+									printContent := string(profileContent)
+									if finalWorkingDir != "" {
+										printContent = filterContentByDir(printContent, finalWorkingDir, isCursor())
+									}
+									fmt.Fprintln(w, printContent)
 								}
-								fmt.Fprintln(w, printContent)
 							}
 						}
+						if !printSelectedProfile {
+							fmt.Fprint(w, generalGuideline)
+							fmt.Fprint(w, toolCallAwareness)
+							fmt.Fprint(w, runningCommand)
+						}
 					}
-					if !printSelectedProfile {
-						fmt.Fprint(w, generalGuideline)
-						fmt.Fprint(w, toolCallAwareness)
-						fmt.Fprint(w, runningCommand)
-					}
+				} else {
+					fmt.Fprintln(w, "The user is thinking, please execute `whats_next` again.")
+					fmt.Fprintln(w)
+					printlnContent(w, generalGuideline)
 				}
-			} else {
-				fmt.Fprintln(w, "The user is thinking, please execute `whats_next` again.")
-				fmt.Fprintln(w)
-				printlnContent(w, generalGuideline)
+
+				Logf("Client finished")
+
+			case <-time.After(deadline.Sub(time.Now())): // Timeout for client requests
+				http.Error(w, "Timeout waiting for input", http.StatusRequestTimeout)
+				Logf("Client request timed out")
 			}
-
-			Logf("Client finished")
-
-		case <-time.After(10 * time.Minute): // Timeout for client requests
-			http.Error(w, "Timeout waiting for input", http.StatusRequestTimeout)
-			Logf("Client request timed out")
 		}
 	})
 

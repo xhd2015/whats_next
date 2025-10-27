@@ -153,8 +153,6 @@ var TIMEOUT = 3 * time.Minute
 
 var USE_BACKSLAHS = false
 
-const FORCE_NON_TERMINAL = false
-
 const DISABLE_TIMER = false
 
 func handleCommands(args []string) error {

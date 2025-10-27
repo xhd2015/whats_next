@@ -14,21 +14,24 @@ import (
 )
 
 type multiLineEditorModel struct {
-	textarea    textarea.Model
-	finished    bool
-	cancelled   bool
-	content     string
-	hasInput    *int32
-	startTime   time.Time
-	timeout     time.Duration
-	showTimer   bool
-	frozenTime  time.Duration // Time remaining when user first typed
-	timerFrozen bool          // Whether timer is frozen due to user input
+	textarea         textarea.Model
+	finished         bool
+	cancelled        bool
+	content          string
+	hasInput         *int32
+	timeoutBeginTime time.Time
+	timeout          time.Duration
+	showTimer        bool
+	frozenTime       time.Duration // Time remaining when user first typed
+	timerFrozen      bool          // Whether timer is frozen due to user input
 
 	getContentAfterUser func() string
 }
 
 type timerTickMsg time.Time
+
+type enableTimerMsg struct{}
+type disableTimerMsg struct{}
 
 func (m multiLineEditorModel) Init() tea.Cmd {
 	if m.showTimer {
@@ -46,10 +49,22 @@ func timerTick() tea.Cmd {
 func (m multiLineEditorModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 
-	switch msg := msg.(type) {
+	var needProcessTick bool
+	switch msg.(type) {
+	case enableTimerMsg:
+		m.showTimer = true
+		m.timeoutBeginTime = time.Now()
+		needProcessTick = true
+		Logf("enable timer")
+	case disableTimerMsg:
+		m.showTimer = false
 	case timerTickMsg:
+		needProcessTick = true
+	}
+
+	if needProcessTick {
 		if m.showTimer && atomic.LoadInt32(m.hasInput) == 0 {
-			elapsed := time.Since(m.startTime)
+			elapsed := time.Since(m.timeoutBeginTime)
 			if elapsed >= m.timeout {
 				// Timeout reached
 				m.cancelled = true
@@ -60,11 +75,14 @@ func (m multiLineEditorModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// Freeze timer if user has input
 		if atomic.LoadInt32(m.hasInput) > 0 && !m.timerFrozen {
-			elapsed := time.Since(m.startTime)
+			elapsed := time.Since(m.timeoutBeginTime)
 			m.frozenTime = m.timeout - elapsed
 			m.timerFrozen = true
 		}
 		return m, nil
+	}
+
+	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		// Set hasInput when user types any content (except control keys that don't add content)
 		switch msg.Type {
@@ -163,6 +181,12 @@ func (m multiLineEditorModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m multiLineEditorModel) View() string {
 	var userPrompt string
+
+	var extraContent string
+	if m.getContentAfterUser != nil {
+		extraContent = m.getContentAfterUser()
+	}
+
 	if m.showTimer {
 		var remaining time.Duration
 		if m.timerFrozen {
@@ -170,7 +194,7 @@ func (m multiLineEditorModel) View() string {
 			remaining = m.frozenTime
 		} else if atomic.LoadInt32(m.hasInput) == 0 {
 			// Show live countdown when user hasn't typed
-			elapsed := time.Since(m.startTime)
+			elapsed := time.Since(m.timeoutBeginTime)
 			remaining = m.timeout - elapsed
 		} else {
 			// Fallback case
@@ -181,16 +205,12 @@ func (m multiLineEditorModel) View() string {
 			minutes := int(remaining.Minutes())
 			seconds := int(remaining.Seconds()) % 60
 
-			var extraContent string
-			if m.getContentAfterUser != nil {
-				extraContent = m.getContentAfterUser()
-			}
 			userPrompt = fmt.Sprintf("user (%dm %02ds)> %s", minutes, seconds, extraContent)
 		} else {
 			userPrompt = "user> "
 		}
 	} else {
-		userPrompt = "user> "
+		userPrompt = fmt.Sprintf("user> %s", extraContent)
 	}
 
 	helpText := "\n\nType 'END'(Ctrl+S) to submit • Type 'CLEAR'(Ctrl+D) to reset • Type 'exit'(esc) to quit"
@@ -205,7 +225,20 @@ func (m multiLineEditorModel) View() string {
 // - Support special commands: END (submit), CLEAR (reset), exit (quit)
 // - Must work inline in terminal, not as vim-like overlay
 
-func readInputFromTerminal(ctx context.Context, hasInput *int32, timeout time.Duration, showTimer bool, getContentAfterUser func() string) ([]string, error) {
+type readTerminalOptions struct {
+	showTimer           bool
+	getContentAfterUser func() string
+
+	onCreatedProgram  func(program *tea.Program)
+	onProgramFinished func(program *tea.Program)
+}
+
+func readInputFromTerminal(ctx context.Context, hasInput *int32, timeout time.Duration, opts readTerminalOptions) ([]string, error) {
+	showTimer := opts.showTimer
+	getContentAfterUser := opts.getContentAfterUser
+	onCreatedProgram := opts.onCreatedProgram
+	onProgramFinished := opts.onProgramFinished
+
 	ta := textarea.New()
 	ta.Placeholder = "Type your message here... (multi-line supported)"
 	ta.Focus()
@@ -217,7 +250,7 @@ func readInputFromTerminal(ctx context.Context, hasInput *int32, timeout time.Du
 	model := multiLineEditorModel{
 		textarea:            ta,
 		hasInput:            hasInput,
-		startTime:           time.Now(),
+		timeoutBeginTime:    time.Now(),
 		timeout:             timeout,
 		showTimer:           showTimer,
 		getContentAfterUser: getContentAfterUser,
@@ -225,7 +258,14 @@ func readInputFromTerminal(ctx context.Context, hasInput *int32, timeout time.Du
 
 	// Use WITHOUT AltScreen to work inline in terminal
 	program := tea.NewProgram(model, tea.WithContext(ctx))
+	if onCreatedProgram != nil {
+		onCreatedProgram(program)
+	}
 	finalModel, err := program.Run()
+	if onProgramFinished != nil {
+		// clear
+		onProgramFinished(nil)
+	}
 	if err != nil {
 		// Check if it was cancelled due to timeout
 		if ctx.Err() != nil {
