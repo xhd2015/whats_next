@@ -316,89 +316,91 @@ func handleServe(args []string) error {
 		defer h.notifyRequestFinished()
 
 		Logf("Client connected")
-		workingDir := r.URL.Query().Get("workingDir")
 
 		w.Header().Set("Content-Type", "text/plain")
 
 		deadline := time.Now().Add(10 * time.Minute)
 
-		for {
-			// Wait for input from the background goroutine
-			select {
-			case msg, ok := <-h.inputChan:
-				if !ok {
-					http.Error(w, "Input channel closed", http.StatusInternalServerError)
-					Errorf("Input channel closed")
-					return
-				}
-
-				if msg.Error != nil {
-					if msg.Error.Error() == "exit" {
-						fmt.Fprint(w, "exit")
-						Logf("Client received exit command")
-						return
-					}
-					http.Error(w, msg.Error.Error(), http.StatusInternalServerError)
-					Errorf("Error: %v", msg.Error)
-					return
-				}
-
-				// Use the working directory from the client request if provided,
-				// otherwise use the one from the input message
-				finalWorkingDir := workingDir
-				if finalWorkingDir == "" {
-					finalWorkingDir = msg.WorkingDir
-				}
-
-				// Process the content and add the appropriate context
-				content := msg.Content
-				if content != "" {
-					// Extract the user question from the content if it follows the expected format
-					if strings.Contains(content, "<question>") {
-						fmt.Fprint(w, content)
-					} else {
-						// Format it as a question if it's raw input
-						fmt.Fprintf(w, "the user is asking: \n<question>\n%s\n</question>\nplease think step by step and give your answer\n", content)
-						fmt.Fprintln(w, "----")
-
-						// Add the guidelines and context
-						var printSelectedProfile bool
-						config, err := readConfig()
-						if err == nil && config.SelectedProfile != "" {
-							groupDir, err := getGroupConfigPath(false)
-							if err == nil {
-								profileName := addMDSuffix(config.SelectedProfile)
-								groupFile := filepath.Join(groupDir, profileName)
-								if profileContent, readErr := os.ReadFile(groupFile); readErr == nil {
-									printSelectedProfile = true
-									printContent := string(profileContent)
-									if finalWorkingDir != "" {
-										printContent = filterContentByDir(printContent, finalWorkingDir, isCursor())
-									}
-									fmt.Fprintln(w, printContent)
-								}
-							}
-						}
-						if !printSelectedProfile {
-							fmt.Fprint(w, generalGuideline)
-							fmt.Fprint(w, toolCallAwareness)
-							fmt.Fprint(w, runningCommand)
-						}
-					}
-				} else {
-					fmt.Fprintln(w, "The user is thinking, please execute `whats_next` again.")
-					fmt.Fprintln(w)
-					printlnContent(w, generalGuideline)
-				}
-
-				Logf("Client finished")
-
-			case <-time.After(deadline.Sub(time.Now())): // Timeout for client requests
-				http.Error(w, "Timeout waiting for input", http.StatusRequestTimeout)
-				Logf("Client request timed out")
-			}
-		}
+		handleRequest(h, w, r, deadline)
 	})
 
 	return http.ListenAndServe(fmt.Sprintf(":%d", SERVER_PORT), nil)
+}
+
+func handleRequest(h *serveHandler, w http.ResponseWriter, r *http.Request, deadline time.Time) {
+	workingDir := r.URL.Query().Get("workingDir")
+
+	// Wait for input from the background goroutine
+	select {
+	case msg, ok := <-h.inputChan:
+		if !ok {
+			http.Error(w, "Input channel closed", http.StatusInternalServerError)
+			Errorf("Input channel closed")
+			return
+		}
+
+		if msg.Error != nil {
+			if msg.Error.Error() == "exit" {
+				fmt.Fprint(w, "exit")
+				Logf("Client received exit command")
+				return
+			}
+			http.Error(w, msg.Error.Error(), http.StatusInternalServerError)
+			Errorf("Error: %v", msg.Error)
+			return
+		}
+
+		// Use the working directory from the client request if provided,
+		// otherwise use the one from the input message
+		finalWorkingDir := workingDir
+		if finalWorkingDir == "" {
+			finalWorkingDir = msg.WorkingDir
+		}
+
+		// Process the content and add the appropriate context
+		content := msg.Content
+		if content != "" {
+			// Extract the user question from the content if it follows the expected format
+			if strings.Contains(content, "<question>") {
+				fmt.Fprint(w, content)
+			} else {
+				// Format it as a question if it's raw input
+				fmt.Fprintf(w, "the user is asking: \n<question>\n%s\n</question>\nplease think step by step and give your answer\n", content)
+				fmt.Fprintln(w, "----")
+
+				// Add the guidelines and context
+				var printSelectedProfile bool
+				config, err := readConfig()
+				if err == nil && config.SelectedProfile != "" {
+					groupDir, err := getGroupConfigPath(false)
+					if err == nil {
+						profileName := addMDSuffix(config.SelectedProfile)
+						groupFile := filepath.Join(groupDir, profileName)
+						if profileContent, readErr := os.ReadFile(groupFile); readErr == nil {
+							printSelectedProfile = true
+							printContent := string(profileContent)
+							if finalWorkingDir != "" {
+								printContent = filterContentByDir(printContent, finalWorkingDir, isCursor())
+							}
+							fmt.Fprintln(w, printContent)
+						}
+					}
+				}
+				if !printSelectedProfile {
+					fmt.Fprint(w, generalGuideline)
+					fmt.Fprint(w, toolCallAwareness)
+					fmt.Fprint(w, runningCommand)
+				}
+			}
+		} else {
+			fmt.Fprintln(w, "The user is thinking, please execute `whats_next` again.")
+			fmt.Fprintln(w)
+			printlnContent(w, generalGuideline)
+		}
+
+		Logf("Client finished")
+	case <-time.After(time.Until(deadline)): // Timeout for client requests
+		http.Error(w, "Timeout waiting for input", http.StatusRequestTimeout)
+		Logf("Client request timed out")
+	}
 }
