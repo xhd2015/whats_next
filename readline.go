@@ -13,213 +13,6 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
-type multiLineEditorModel struct {
-	textarea         textarea.Model
-	finished         bool
-	cancelled        bool
-	content          string
-	hasInput         *int32
-	timeoutBeginTime time.Time
-	timeout          time.Duration
-	showTimer        bool
-	frozenTime       time.Duration // Time remaining when user first typed
-	timerFrozen      bool          // Whether timer is frozen due to user input
-
-	getContentAfterUser func() string
-}
-
-type timerTickMsg time.Time
-
-type enableTimerMsg struct{}
-type disableTimerMsg struct{}
-
-func (m multiLineEditorModel) Init() tea.Cmd {
-	if m.showTimer {
-		return tea.Batch(textarea.Blink, timerTick())
-	}
-	return textarea.Blink
-}
-
-func timerTick() tea.Cmd {
-	return tea.Tick(time.Second, func(t time.Time) tea.Msg {
-		return timerTickMsg(t)
-	})
-}
-
-func (m multiLineEditorModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	var cmd tea.Cmd
-
-	var needProcessTick bool
-	switch msg.(type) {
-	case enableTimerMsg:
-		m.showTimer = true
-		m.timeoutBeginTime = time.Now()
-		needProcessTick = true
-		Logf("enable timer")
-	case disableTimerMsg:
-		m.showTimer = false
-	case timerTickMsg:
-		needProcessTick = true
-	case tea.QuitMsg:
-		Logf("quit")
-		return m, tea.Quit
-	}
-
-	if needProcessTick {
-		if m.showTimer && atomic.LoadInt32(m.hasInput) == 0 {
-			elapsed := time.Since(m.timeoutBeginTime)
-			if elapsed >= m.timeout {
-				// Timeout reached
-				m.cancelled = true
-				return m, tea.Quit
-			}
-			// Continue ticking
-			return m, timerTick()
-		}
-		// Freeze timer if user has input
-		if atomic.LoadInt32(m.hasInput) > 0 && !m.timerFrozen {
-			elapsed := time.Since(m.timeoutBeginTime)
-			m.frozenTime = m.timeout - elapsed
-			m.timerFrozen = true
-		}
-		return m, nil
-	}
-
-	switch msg := msg.(type) {
-	case tea.KeyMsg:
-		// Set hasInput when user types any content (except control keys that don't add content)
-		switch msg.Type {
-		case tea.KeyCtrlC, tea.KeyCtrlD, tea.KeyCtrlS, tea.KeyEsc:
-			// Control keys - don't set hasInput
-		default:
-			// Any other key (including printable chars, enter, backspace) indicates user input
-			if m.hasInput != nil {
-				atomic.StoreInt32(m.hasInput, 1)
-			}
-		}
-
-		switch msg.Type {
-		case tea.KeyCtrlC:
-			m.cancelled = true
-			return m, tea.Quit
-		case tea.KeyCtrlD:
-			if strings.TrimSpace(m.textarea.Value()) == "" {
-				m.cancelled = true
-				return m, tea.Quit
-			}
-			fallthrough
-		case tea.KeyCtrlS:
-			// Submit with Ctrl+S or Ctrl+D (if content exists)
-			content := m.textarea.Value()
-			// Check for END command
-			if strings.HasSuffix(strings.TrimSpace(content), "END") {
-				content = strings.TrimSuffix(strings.TrimSpace(content), "END")
-				content = strings.TrimSpace(content)
-			}
-			// Check for CLEAR command
-			if strings.TrimSpace(content) == "CLEAR" {
-				m.textarea.Reset()
-				return m, nil
-			}
-			// Check for exit command
-			if strings.TrimSpace(content) == "exit" {
-				m.cancelled = true
-				return m, tea.Quit
-			}
-
-			m.content = content
-			m.finished = true
-			return m, tea.Quit
-		case tea.KeyEnter:
-			content := m.textarea.Value()
-			lines := strings.Split(content, "\n")
-			if len(lines) > 0 {
-				lastLine := strings.TrimSpace(lines[len(lines)-1])
-
-				// Check for CLEAR command on last line
-				if lastLine == "CLEAR" {
-					m.textarea.Reset()
-					return m, nil
-				}
-
-				// Check for exit command on last line
-				if lastLine == "exit" {
-					m.cancelled = true
-					return m, tea.Quit
-				}
-
-				// Check if the current line ends with END for shortcut submission
-				if strings.HasSuffix(lastLine, "END") {
-					// Remove the END from the last line and submit
-					if lastLine == "END" {
-						// If the last line is just "END", remove the entire line
-						if len(lines) > 1 {
-							content = strings.Join(lines[:len(lines)-1], "\n")
-						} else {
-							content = ""
-						}
-					} else {
-						// Remove "END" from the end of the last line
-						newLastLine := strings.TrimSuffix(lastLine, "END")
-						newLastLine = strings.TrimSpace(newLastLine)
-						lines[len(lines)-1] = newLastLine
-						content = strings.Join(lines, "\n")
-					}
-					content = strings.TrimSpace(content)
-
-					m.content = content
-					m.finished = true
-					return m, tea.Quit
-				}
-			}
-		case tea.KeyEsc:
-			m.cancelled = true
-			return m, tea.Quit
-		}
-	}
-
-	m.textarea, cmd = m.textarea.Update(msg)
-	return m, cmd
-}
-
-func (m multiLineEditorModel) View() string {
-	var userPrompt string
-
-	var extraContent string
-	if m.getContentAfterUser != nil {
-		extraContent = m.getContentAfterUser()
-	}
-
-	if m.showTimer {
-		var remaining time.Duration
-		if m.timerFrozen {
-			// Show frozen time when user has typed
-			remaining = m.frozenTime
-		} else if atomic.LoadInt32(m.hasInput) == 0 {
-			// Show live countdown when user hasn't typed
-			elapsed := time.Since(m.timeoutBeginTime)
-			remaining = m.timeout - elapsed
-		} else {
-			// Fallback case
-			userPrompt = "user> "
-		}
-
-		if remaining > 0 {
-			minutes := int(remaining.Minutes())
-			seconds := int(remaining.Seconds()) % 60
-
-			userPrompt = fmt.Sprintf("user (%dm %02ds)> %s", minutes, seconds, extraContent)
-		} else {
-			userPrompt = "user> "
-		}
-	} else {
-		userPrompt = fmt.Sprintf("user> %s", extraContent)
-	}
-
-	helpText := "\n\nType 'END'(Ctrl+S) to submit • Type 'CLEAR'(Ctrl+D) to reset • Type 'exit'(esc) to quit"
-	return fmt.Sprintf("%s\n%s%s", userPrompt, m.textarea.View(), helpText)
-}
-
 // readInputFromTerminal reads multiline input from terminal with rich editing capabilities.
 // Requirements:
 // - Support arrow keys for navigation (left, right, up, down)
@@ -229,18 +22,23 @@ func (m multiLineEditorModel) View() string {
 // - Must work inline in terminal, not as vim-like overlay
 
 type readTerminalOptions struct {
-	showTimer           bool
-	getContentAfterUser func() string
+	showTimer     func() bool
+	getUserPrompt func(hasInput bool) string
+
+	noWrapWithGuidelines bool
 
 	onCreatedProgram  func(program *tea.Program)
 	onProgramFinished func(program *tea.Program)
+	onInputExit       func()
+	onInputUpdate     func(hasInput bool)
 }
 
-func readInputFromTerminal(ctx context.Context, hasInput *int32, timeout time.Duration, opts readTerminalOptions) ([]string, error) {
+func readInputFromTerminal(ctx context.Context, hasInput *int32, timeout time.Duration, onInputUpdate func(hasInput bool), opts readTerminalOptions) ([]string, error) {
 	showTimer := opts.showTimer
-	getContentAfterUser := opts.getContentAfterUser
+	userPrompt := opts.getUserPrompt
 	onCreatedProgram := opts.onCreatedProgram
 	onProgramFinished := opts.onProgramFinished
+	onInputExit := opts.onInputExit
 
 	ta := textarea.New()
 	ta.Placeholder = "Type your message here... (multi-line supported)"
@@ -251,12 +49,14 @@ func readInputFromTerminal(ctx context.Context, hasInput *int32, timeout time.Du
 	ta.ShowLineNumbers = false
 
 	model := multiLineEditorModel{
-		textarea:            ta,
-		hasInput:            hasInput,
-		timeoutBeginTime:    time.Now(),
-		timeout:             timeout,
-		showTimer:           showTimer,
-		getContentAfterUser: getContentAfterUser,
+		textarea:         ta,
+		hasInput:         hasInput,
+		timeoutBeginTime: time.Now(),
+		timeout:          timeout,
+		showTimer:        showTimer,
+		getUserPrompt:    userPrompt,
+		onInputExit:      onInputExit,
+		onInputUpdate:    onInputUpdate,
 	}
 
 	// Use WITHOUT AltScreen to work inline in terminal
@@ -269,7 +69,9 @@ func readInputFromTerminal(ctx context.Context, hasInput *int32, timeout time.Du
 		// clear
 		onProgramFinished(nil)
 	}
+	Logf("readInputFromTerminal program returned: err: %v", err)
 	if err != nil {
+		Logf("readInputFromTerminal error: %v", err)
 		// Check if it was cancelled due to timeout
 		if ctx.Err() != nil {
 			return nil, fmt.Errorf("timeout")
@@ -279,11 +81,13 @@ func readInputFromTerminal(ctx context.Context, hasInput *int32, timeout time.Du
 
 	m := finalModel.(multiLineEditorModel)
 	if m.cancelled {
+		Logf("readInputFromTerminal cancelled")
 		return nil, fmt.Errorf("exit")
 	}
 
 	content := m.content
 	if strings.TrimSpace(content) == "" {
+		Logf("readInputFromTerminal empty content")
 		return []string{}, nil
 	}
 
@@ -314,6 +118,7 @@ func readInputFromTerminal(ctx context.Context, hasInput *int32, timeout time.Du
 	if len(result) == 0 && content != "" {
 		result = []string{content}
 	}
+	Logf("readInputFromTerminal result: %v", result)
 
 	return result, nil
 }

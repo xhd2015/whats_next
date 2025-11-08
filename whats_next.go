@@ -4,9 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,12 +13,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/xhd2015/less-gen/flags"
 	"golang.org/x/term"
-)
-
-const (
-	SERVER_PORT = 7654
 )
 
 func handleWhatsNext(args []string) error {
@@ -32,11 +25,13 @@ func handleWhatsNext(args []string) error {
 
 	// If mode is server, delegate to server mode handler
 	if config.Mode == ModeServer {
-		return handleWhatsNextInServerMode(args)
+		return handleClient(args)
 	}
 	wd, _ := os.Getwd()
 	return createInput(os.Stdout, wd, readTerminalOptions{
-		showTimer: true,
+		showTimer: func() bool {
+			return true
+		},
 	})
 }
 
@@ -45,20 +40,57 @@ type InputMessage struct {
 	Content    string
 	WorkingDir string
 	Error      error
+	Exit       bool
 }
 
 type serveHandler struct {
-	mutex       sync.Mutex
-	inputChan   chan InputMessage
+	mutex sync.Mutex
+
+	inputChan chan InputMessage
+
 	inputCtx    context.Context
 	inputCancel context.CancelFunc
 
-	clientConn int64
-	program    *tea.Program
+	clientConn         int64
+	clientWaitDeadline time.Time
+	lastInputEmptyTime time.Time
+	program            *tea.Program
+
+	httpServer *http.Server
+
+	shutdownRequested bool
+
+	flagHasInputContent int32
 }
 
 func (h *serveHandler) hasProcessingClient() bool {
 	return atomic.LoadInt64(&h.clientConn) > 0
+}
+
+func (h *serveHandler) getClientWaitDeadline() time.Time {
+	h.mutex.Lock()
+	t := h.clientWaitDeadline
+	h.mutex.Unlock()
+	return t
+}
+
+func (h *serveHandler) setClientWaitDeadline(t time.Time) {
+	h.mutex.Lock()
+	h.clientWaitDeadline = t
+	h.mutex.Unlock()
+}
+
+func (h *serveHandler) getLastInputEmptyTime() time.Time {
+	h.mutex.Lock()
+	t := h.lastInputEmptyTime
+	h.mutex.Unlock()
+	return t
+}
+
+func (h *serveHandler) setLastInputEmptyTime(t time.Time) {
+	h.mutex.Lock()
+	h.lastInputEmptyTime = t
+	h.mutex.Unlock()
 }
 
 func (h *serveHandler) setProgram(program *tea.Program) {
@@ -102,7 +134,11 @@ func (h *serveHandler) notifyRequestFinished() {
 	}
 }
 
-func (h *serveHandler) shutdown() {
+func (h *serveHandler) hasWaitingClient() bool {
+	return atomic.LoadInt64(&h.clientConn) > 0
+}
+
+func (h *serveHandler) shutdown(ctx context.Context) {
 	h.mutex.Lock()
 	defer h.mutex.Unlock()
 
@@ -114,6 +150,23 @@ func (h *serveHandler) shutdown() {
 		h.program.Kill()
 		h.program = nil
 	}
+	h.httpServer.Shutdown(ctx)
+}
+
+func (h *serveHandler) requestShutdown() {
+	h.mutex.Lock()
+	defer h.mutex.Unlock()
+	h.shutdownRequested = true
+}
+
+func (h *serveHandler) isShutdownRequested() bool {
+	h.mutex.Lock()
+	defer h.mutex.Unlock()
+	return h.shutdownRequested
+}
+
+func (h *serveHandler) hasInputContent() bool {
+	return atomic.LoadInt32(&h.flagHasInputContent) != 0
 }
 
 func createInput(w io.Writer, workingDir string, opts readTerminalOptions) error {
@@ -138,14 +191,14 @@ func createInput(w io.Writer, workingDir string, opts readTerminalOptions) error
 		var err error
 
 		if isTerminal {
-			lines, err = readInputFromTerminal(ctx, &hasInput, TIMEOUT, opts)
+			lines, err = readInputFromTerminal(ctx, &hasInput, TIMEOUT, opts.onInputUpdate, opts)
 		} else {
 			lines, err = readInputFromNonTerminal(&hasInput)
 		}
 
 		if err != nil {
 			if err.Error() == "exit" {
-				fmt.Fprintln(w, "exit")
+				Logf("exit")
 				done <- Result{}
 				return
 			}
@@ -153,100 +206,76 @@ func createInput(w io.Writer, workingDir string, opts readTerminalOptions) error
 			return
 		}
 		q := strings.Join(lines, "\n")
-		fmt.Fprintf(w, "the user is asking: \n<question>\n%s\n</question>\nplease think step by step and give your answer\n", q)
-
-		fmt.Fprintln(w, "----")
-
-		var printSelectedProfile bool
-		// Check for selected profile and print its content
-		config, err := readConfig()
-		if err == nil && config.SelectedProfile != "" {
-			groupDir, err := getGroupConfigPath(false)
-			if err == nil {
-				profileName := addMDSuffix(config.SelectedProfile)
-				groupFile := filepath.Join(groupDir, profileName)
-				if profileContent, readErr := os.ReadFile(groupFile); readErr == nil {
-					printSelectedProfile = true
-					printContent := string(profileContent)
-					if workingDir != "" {
-						printContent = filterContentByDir(printContent, workingDir, isCursor())
-					}
-					fmt.Fprintln(w, printContent)
-				}
-			}
+		if opts.noWrapWithGuidelines {
+			fmt.Fprintln(w, q)
+		} else {
+			questionGuidelines := wrapQuestionWithGuidelines(q, workingDir)
+			fmt.Fprintln(w, questionGuidelines)
 		}
-		if !printSelectedProfile {
-			fmt.Fprint(w, generalGuideline)
-			fmt.Fprint(w, toolCallAwareness)
-			fmt.Fprint(w, runningCommand)
-		}
-
 		done <- Result{}
 	}()
 
-	select {
-	case <-time.After(TIMEOUT):
-		if atomic.LoadInt32(&hasInput) == 0 {
-			// Cancel the context to gracefully quit any running terminal program
-			cancel()
-			// Wait for the goroutine to finish after cancellation
-			<-done
-			fmt.Fprintln(w, "The user is thinking, please execute `whats_next` again.")
-			fmt.Fprintln(w)
-			printlnContent(w, generalGuideline)
-			return nil
-		}
-		// wait forever for done
-		<-done
-	case result := <-done:
-		// Cancel context to stop timer when input is received
-		cancel()
-		if result.Error != nil {
-			return result.Error
-		}
-		return nil
+	result := <-done
+	// Cancel context to stop timer when input is received
+	if result.Error != nil {
+		return result.Error
 	}
-
 	return nil
 }
 
-func handleWhatsNextInServerMode(args []string) error {
-	wd, _ := os.Getwd()
+func wrapQuestionWithGuidelines(q string, workingDir string) string {
+	var s strings.Builder
+	var w io.Writer = &s
+	fmt.Fprintf(w, "the user is asking: \n<question>\n%s\n</question>\nplease think step by step and give your answer\n", q)
 
-	addr := fmt.Sprintf("localhost:%d", SERVER_PORT)
-	resp, err := http.Get(fmt.Sprintf("http://%s/?workingDir=%s", addr, url.QueryEscape(wd)))
-	if err != nil {
-		// detect if the server is running
-		if _, err := net.LookupHost(addr); err != nil {
-			return fmt.Errorf("failed to lookup host: %v", err)
+	fmt.Fprintln(w, "----")
+
+	var printSelectedProfile bool
+	// Check for selected profile and print its content
+	config, err := readConfig()
+	if err == nil && config.SelectedProfile != "" {
+		groupDir, err := getGroupConfigPath(false)
+		if err == nil {
+			profileName := addMDSuffix(config.SelectedProfile)
+			groupFile := filepath.Join(groupDir, profileName)
+			if profileContent, readErr := os.ReadFile(groupFile); readErr == nil {
+				printSelectedProfile = true
+				printContent := string(profileContent)
+				if workingDir != "" {
+					printContent = filterContentByDir(printContent, workingDir, isCursor())
+				}
+				fmt.Fprintln(w, printContent)
+			}
 		}
-		return fmt.Errorf("failed to connect to server (is it running?): %v\nStart server with: whats_next serve", err)
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("server returned status: %d", resp.StatusCode)
+	if !printSelectedProfile {
+		fmt.Fprint(w, generalGuideline)
+		fmt.Fprint(w, toolCallAwareness)
+		fmt.Fprint(w, runningCommand)
 	}
+	return s.String()
+}
 
-	// Read and display the response from server
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("failed to read response: %v", err)
-	}
-
-	fmt.Print(string(body))
-	return nil
+func isThinking() string {
+	return strings.Join([]string{
+		"The user is thinking, please execute `whats_next` again.",
+		"",
+		generalGuideline,
+	}, "\n")
 }
 
 // startBackgroundInputLoop starts a background goroutine that continuously reads user input
 func (h *serveHandler) startBackgroundInputLoop() {
-	h.inputChan = make(chan InputMessage, 1) // Buffered to prevent blocking
+	h.inputChan = make(chan InputMessage, 100) // up to 100 messages can be buffered
 	h.inputCtx, h.inputCancel = context.WithCancel(context.Background())
 
 	go func() {
 		defer close(h.inputChan)
 
 		for {
+			if h.isShutdownRequested() {
+				return
+			}
 			select {
 			case <-h.inputCtx.Done():
 				return
@@ -258,17 +287,14 @@ func (h *serveHandler) startBackgroundInputLoop() {
 
 				// Read input using the existing acceptInput logic
 				var content strings.Builder
+				var isExit bool
 				err := createInput(&content, wd, readTerminalOptions{
-					showTimer: h.hasProcessingClient(),
-					getContentAfterUser: func() string {
+					showTimer:            h.hasProcessingClient,
+					noWrapWithGuidelines: true,
+					getUserPrompt: func(hasInput bool) string {
 						conn := atomic.LoadInt64(&h.clientConn)
-						if conn == 0 {
-							return "(staging)"
-						}
-						if conn == 1 {
-							return "(client connected)"
-						}
-						return fmt.Sprintf("(%d clients connected)", conn)
+						remaining := h.getClientWaitDeadline().Sub(h.getLastInputEmptyTime())
+						return renderUserPrompt(conn > 0, true, remaining, int(conn))
 					},
 					onCreatedProgram: func(program *tea.Program) {
 						Logf("program created")
@@ -278,12 +304,42 @@ func (h *serveHandler) startBackgroundInputLoop() {
 						Logf("program finished")
 						h.setProgram(nil)
 					},
+					onInputExit: func() {
+						Logf("input exit")
+						isExit = true
+						h.requestShutdown()
+					},
+					onInputUpdate: func(hasInput bool) {
+						if !hasInput {
+							h.setLastInputEmptyTime(time.Now())
+						}
+						atomic.StoreInt32(&h.flagHasInputContent, toBoolInt32(hasInput))
+					},
 				})
 
 				msg := InputMessage{
 					Content:    content.String(),
 					WorkingDir: wd,
 					Error:      err,
+					Exit:       isExit,
+				}
+
+				if h.isShutdownRequested() {
+					if !h.hasWaitingClient() {
+						Logf("exit immediately due to no active client")
+						h.shutdown(context.Background())
+						return
+					}
+
+					// just try to send, if failed, just return
+					select {
+					case h.inputChan <- msg:
+						Logf("exit will be handled after client received exit")
+					default:
+						Logf("exit immediately due to client buffer full")
+						h.shutdown(context.Background())
+					}
+					return
 				}
 
 				// Send the input to the channel (non-blocking)
@@ -298,168 +354,9 @@ func (h *serveHandler) startBackgroundInputLoop() {
 	}()
 }
 
-func handleServe(args []string) error {
-	fmt.Printf("Starting server on port %d...", SERVER_PORT)
-
-	var logFlag bool
-	var kill bool
-	args, err := flags.
-		Bool("--log", &logFlag).
-		Bool("--kill", &kill).
-		Parse(args)
-	if err != nil {
-		return err
+func toBoolInt32(b bool) int32 {
+	if b {
+		return 1
 	}
-
-	if len(args) > 0 {
-		return fmt.Errorf("unrecognized extra args: %s", strings.Join(args, " "))
-	}
-
-	if logFlag {
-		if err := initLoggers(); err != nil {
-			return err
-		}
-		defer closeLoggers()
-	}
-	serverAddr := getServerAddr()
-	if kill {
-		// get to /kill and send a POST request
-		resp, err := http.Get(fmt.Sprintf("http://%s/kill", serverAddr))
-		if err != nil {
-			if !isAddrReachable(serverAddr) {
-				fmt.Fprintf(os.Stderr, "Server is not running\n")
-				return nil
-			}
-			return fmt.Errorf("failed to send kill request: %v", err)
-		}
-		defer resp.Body.Close()
-		if resp.StatusCode != http.StatusOK {
-			return fmt.Errorf("failed to kill server: %d", resp.StatusCode)
-		}
-		fmt.Printf("Server %s killed\n", serverAddr)
-		return nil
-	}
-	h := &serveHandler{}
-
-	mux := http.NewServeMux()
-	server := &http.Server{Addr: serverAddr, Handler: mux}
-
-	// Start the background input loop
-	h.startBackgroundInputLoop()
-
-	// Ensure cleanup on exit
-	defer h.shutdown()
-
-	mux.HandleFunc("/kill", func(w http.ResponseWriter, r *http.Request) {
-		ctx := context.Background()
-		fmt.Fprintf(w, "Server killed")
-		h.shutdown()
-		server.Shutdown(ctx)
-	})
-
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		h.notifyRequestAccepted()
-		defer h.notifyRequestFinished()
-
-		Logf("Client connected")
-
-		w.Header().Set("Content-Type", "text/plain")
-
-		deadline := time.Now().Add(10 * time.Minute)
-
-		handleRequest(h, w, r, deadline)
-	})
-
-	return server.ListenAndServe()
-}
-
-func handleRequest(h *serveHandler, w http.ResponseWriter, r *http.Request, deadline time.Time) {
-	workingDir := r.URL.Query().Get("workingDir")
-
-	// Wait for input from the background goroutine
-	select {
-	case msg, ok := <-h.inputChan:
-		if !ok {
-			http.Error(w, "Input channel closed", http.StatusInternalServerError)
-			Errorf("Input channel closed")
-			return
-		}
-
-		if msg.Error != nil {
-			if msg.Error.Error() == "exit" {
-				fmt.Fprint(w, "exit")
-				Logf("Client received exit command")
-				return
-			}
-			http.Error(w, msg.Error.Error(), http.StatusInternalServerError)
-			Errorf("Error: %v", msg.Error)
-			return
-		}
-
-		// Use the working directory from the client request if provided,
-		// otherwise use the one from the input message
-		finalWorkingDir := workingDir
-		if finalWorkingDir == "" {
-			finalWorkingDir = msg.WorkingDir
-		}
-
-		// Process the content and add the appropriate context
-		content := msg.Content
-		if content != "" {
-			// Extract the user question from the content if it follows the expected format
-			if strings.Contains(content, "<question>") {
-				fmt.Fprint(w, content)
-			} else {
-				// Format it as a question if it's raw input
-				fmt.Fprintf(w, "the user is asking: \n<question>\n%s\n</question>\nplease think step by step and give your answer\n", content)
-				fmt.Fprintln(w, "----")
-
-				// Add the guidelines and context
-				var printSelectedProfile bool
-				config, err := readConfig()
-				if err == nil && config.SelectedProfile != "" {
-					groupDir, err := getGroupConfigPath(false)
-					if err == nil {
-						profileName := addMDSuffix(config.SelectedProfile)
-						groupFile := filepath.Join(groupDir, profileName)
-						if profileContent, readErr := os.ReadFile(groupFile); readErr == nil {
-							printSelectedProfile = true
-							printContent := string(profileContent)
-							if finalWorkingDir != "" {
-								printContent = filterContentByDir(printContent, finalWorkingDir, isCursor())
-							}
-							fmt.Fprintln(w, printContent)
-						}
-					}
-				}
-				if !printSelectedProfile {
-					fmt.Fprint(w, generalGuideline)
-					fmt.Fprint(w, toolCallAwareness)
-					fmt.Fprint(w, runningCommand)
-				}
-			}
-		} else {
-			fmt.Fprintln(w, "The user is thinking, please execute `whats_next` again.")
-			fmt.Fprintln(w)
-			printlnContent(w, generalGuideline)
-		}
-
-		Logf("Client finished")
-	case <-time.After(time.Until(deadline)): // Timeout for client requests
-		http.Error(w, "Timeout waiting for input", http.StatusRequestTimeout)
-		Logf("Client request timed out")
-	}
-}
-
-func getServerAddr() string {
-	return fmt.Sprintf("localhost:%d", SERVER_PORT)
-}
-
-func isAddrReachable(addr string) bool {
-	conn, err := net.DialTimeout("tcp", addr, 10*time.Millisecond)
-	if err != nil {
-		return false
-	}
-	conn.Close()
-	return true
+	return 0
 }

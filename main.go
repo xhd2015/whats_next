@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/xhd2015/less-gen/flags"
 	"github.com/xhd2015/xgo/support/cmd"
@@ -140,17 +139,6 @@ func main() {
 	}
 }
 
-// TODO: let's propose a dialog when this is completed
-//
-//   osascript -e 'display dialog "Task completed!" buttons {"OK"} default button "OK" with title "Task"'
-
-// tested: 2m works fine,
-// tested: 3m works fine
-// let's try 3m
-var TIMEOUT = 3 * time.Minute
-
-// var TIMEOUT = 5 * time.Second // for testing
-
 var USE_BACKSLAHS = false
 
 const DISABLE_TIMER = false
@@ -184,7 +172,7 @@ func handleCommands(args []string) error {
 		case "group":
 			return group(args[1:])
 		case "serve":
-			return handleServe(args[1:])
+			return handleServer(args[1:])
 		case "--help", "help":
 			return handleHelp(args[1:])
 		default:
