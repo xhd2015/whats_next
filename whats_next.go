@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -21,6 +22,23 @@ import (
 const (
 	SERVER_PORT = 7654
 )
+
+func handleWhatsNext(args []string) error {
+	// Check config for mode
+	config, err := readConfig()
+	if err != nil {
+		return err
+	}
+
+	// If mode is server, delegate to server mode handler
+	if config.Mode == ModeServer {
+		return handleWhatsNextInServerMode(args)
+	}
+	wd, _ := os.Getwd()
+	return createInput(os.Stdout, wd, readTerminalOptions{
+		showTimer: true,
+	})
+}
 
 // Global state for background input handling
 type InputMessage struct {
@@ -84,21 +102,18 @@ func (h *serveHandler) notifyRequestFinished() {
 	}
 }
 
-func handleWhatsNext(args []string) error {
-	// Check config for mode
-	config, err := readConfig()
-	if err != nil {
-		return err
-	}
+func (h *serveHandler) shutdown() {
+	h.mutex.Lock()
+	defer h.mutex.Unlock()
 
-	// If mode is server, delegate to server mode handler
-	if config.Mode == ModeServer {
-		return handleWhatsNextInServerMode(args)
+	if h.inputCancel != nil {
+		h.inputCancel()
+		h.inputCancel = nil
 	}
-	wd, _ := os.Getwd()
-	return createInput(os.Stdout, wd, readTerminalOptions{
-		showTimer: true,
-	})
+	if h.program != nil {
+		h.program.Kill()
+		h.program = nil
+	}
 }
 
 func createInput(w io.Writer, workingDir string, opts readTerminalOptions) error {
@@ -194,13 +209,17 @@ func createInput(w io.Writer, workingDir string, opts readTerminalOptions) error
 
 	return nil
 }
-func handleWhatsNextInServerMode(args []string) error {
-	// Make a request to the server, which will trigger input prompt on server side
-	fmt.Println("Processing...")
 
+func handleWhatsNextInServerMode(args []string) error {
 	wd, _ := os.Getwd()
-	resp, err := http.Get(fmt.Sprintf("http://localhost:%d/?workingDir=%s", SERVER_PORT, url.QueryEscape(wd)))
+
+	addr := fmt.Sprintf("localhost:%d", SERVER_PORT)
+	resp, err := http.Get(fmt.Sprintf("http://%s/?workingDir=%s", addr, url.QueryEscape(wd)))
 	if err != nil {
+		// detect if the server is running
+		if _, err := net.LookupHost(addr); err != nil {
+			return fmt.Errorf("failed to lookup host: %v", err)
+		}
 		return fmt.Errorf("failed to connect to server (is it running?): %v\nStart server with: whats_next serve", err)
 	}
 	defer resp.Body.Close()
@@ -220,7 +239,7 @@ func handleWhatsNextInServerMode(args []string) error {
 }
 
 // startBackgroundInputLoop starts a background goroutine that continuously reads user input
-func startBackgroundInputLoop(h *serveHandler) {
+func (h *serveHandler) startBackgroundInputLoop() {
 	h.inputChan = make(chan InputMessage, 1) // Buffered to prevent blocking
 	h.inputCtx, h.inputCancel = context.WithCancel(context.Background())
 
@@ -279,39 +298,66 @@ func startBackgroundInputLoop(h *serveHandler) {
 	}()
 }
 
-// stopBackgroundInputLoop stops the background input goroutine
-func stopBackgroundInputLoop(h *serveHandler) {
-	if h.inputCancel != nil {
-		h.inputCancel()
-	}
-}
-
 func handleServe(args []string) error {
 	fmt.Printf("Starting server on port %d...", SERVER_PORT)
 
 	var logFlag bool
+	var kill bool
 	args, err := flags.
 		Bool("--log", &logFlag).
+		Bool("--kill", &kill).
 		Parse(args)
 	if err != nil {
 		return err
 	}
+
+	if len(args) > 0 {
+		return fmt.Errorf("unrecognized extra args: %s", strings.Join(args, " "))
+	}
+
 	if logFlag {
 		if err := initLoggers(); err != nil {
 			return err
 		}
 		defer closeLoggers()
 	}
-
+	serverAddr := getServerAddr()
+	if kill {
+		// get to /kill and send a POST request
+		resp, err := http.Get(fmt.Sprintf("http://%s/kill", serverAddr))
+		if err != nil {
+			if !isAddrReachable(serverAddr) {
+				fmt.Fprintf(os.Stderr, "Server is not running\n")
+				return nil
+			}
+			return fmt.Errorf("failed to send kill request: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			return fmt.Errorf("failed to kill server: %d", resp.StatusCode)
+		}
+		fmt.Printf("Server %s killed\n", serverAddr)
+		return nil
+	}
 	h := &serveHandler{}
 
+	mux := http.NewServeMux()
+	server := &http.Server{Addr: serverAddr, Handler: mux}
+
 	// Start the background input loop
-	startBackgroundInputLoop(h)
+	h.startBackgroundInputLoop()
 
 	// Ensure cleanup on exit
-	defer stopBackgroundInputLoop(h)
+	defer h.shutdown()
 
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/kill", func(w http.ResponseWriter, r *http.Request) {
+		ctx := context.Background()
+		fmt.Fprintf(w, "Server killed")
+		h.shutdown()
+		server.Shutdown(ctx)
+	})
+
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		h.notifyRequestAccepted()
 		defer h.notifyRequestFinished()
 
@@ -324,7 +370,7 @@ func handleServe(args []string) error {
 		handleRequest(h, w, r, deadline)
 	})
 
-	return http.ListenAndServe(fmt.Sprintf(":%d", SERVER_PORT), nil)
+	return server.ListenAndServe()
 }
 
 func handleRequest(h *serveHandler, w http.ResponseWriter, r *http.Request, deadline time.Time) {
@@ -403,4 +449,17 @@ func handleRequest(h *serveHandler, w http.ResponseWriter, r *http.Request, dead
 		http.Error(w, "Timeout waiting for input", http.StatusRequestTimeout)
 		Logf("Client request timed out")
 	}
+}
+
+func getServerAddr() string {
+	return fmt.Sprintf("localhost:%d", SERVER_PORT)
+}
+
+func isAddrReachable(addr string) bool {
+	conn, err := net.DialTimeout("tcp", addr, 10*time.Millisecond)
+	if err != nil {
+		return false
+	}
+	conn.Close()
+	return true
 }

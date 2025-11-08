@@ -60,6 +60,9 @@ func (m multiLineEditorModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.showTimer = false
 	case timerTickMsg:
 		needProcessTick = true
+	case tea.QuitMsg:
+		Logf("quit")
+		return m, tea.Quit
 	}
 
 	if needProcessTick {
