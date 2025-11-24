@@ -60,8 +60,6 @@ func handleClient(args []string) error {
 }
 
 func handleServer(args []string) error {
-	fmt.Printf("Starting server on port %d...", SERVER_PORT)
-
 	var logFlag bool
 	var kill bool
 	args, err := flags.
@@ -115,9 +113,13 @@ func handleServer(args []string) error {
 	defer h.shutdown(context.Background())
 
 	mux.HandleFunc("/kill", func(w http.ResponseWriter, r *http.Request) {
+		h.requestShutdown()
 		ctx := context.Background()
-		fmt.Fprintf(w, "Server killed")
-		h.shutdown(ctx)
+
+		// must be handled in a goroutine
+		// otherwise the serve won't be closed due to graceful shutdown
+		go h.shutdown(ctx)
+		Logf("Server killed")
 	})
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -145,6 +147,7 @@ func handleServer(args []string) error {
 		}
 	})
 
+	fmt.Printf("Starting server on port %d...", SERVER_PORT)
 	serverErr := server.ListenAndServe()
 	if h.isShutdownRequested() {
 		return nil
