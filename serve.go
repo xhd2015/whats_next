@@ -99,6 +99,11 @@ func handleServer(args []string) error {
 		return nil
 	}
 
+	if isAddrReachable(serverAddr) {
+		fmt.Printf("Server %s is already running\n", serverAddr)
+		return nil
+	}
+
 	mux := http.NewServeMux()
 	server := &http.Server{Addr: serverAddr, Handler: mux}
 
