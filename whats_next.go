@@ -317,12 +317,15 @@ func (h *serveHandler) startBackgroundInputLoop() {
 					},
 				})
 
+				contentStr := content.String()
 				msg := InputMessage{
-					Content:    content.String(),
+					Content:    contentStr,
 					WorkingDir: wd,
 					Error:      err,
 					Exit:       isExit,
 				}
+
+				fmt.Println(contentStr)
 
 				if h.isShutdownRequested() {
 					if !h.hasWaitingClient() {

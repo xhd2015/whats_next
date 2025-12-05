@@ -240,7 +240,6 @@ func handleRequest(h *serveHandler, w http.ResponseWriter, r *http.Request, idle
 
 	content := strings.Join(contents, "\n")
 	Logf("Client request content: %s", content)
-	// Process the content and add the appropriate context
 
 	if content != "" {
 		resp := wrapQuestionWithGuidelines(content, finalWorkingDir)
