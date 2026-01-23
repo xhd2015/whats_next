@@ -120,6 +120,7 @@ Commands:
   group
 
 Options:
+  --port PORT    Connect to server on specified port (default: 7654)
   --editor EDITOR
 
 Sub commands for group:
@@ -146,6 +147,10 @@ const DISABLE_TIMER = false
 func handleCommands(args []string) error {
 	if len(args) > 0 {
 		cmd := args[0]
+		// If first arg starts with "-", treat as options for the default whats_next command
+		if strings.HasPrefix(cmd, "-") {
+			return handleWhatsNext(args)
+		}
 		switch cmd {
 		case "show":
 			showArgs := args[1:]

@@ -30,9 +30,18 @@ const (
 )
 
 func handleClient(args []string) error {
+	var port int
+	args, err := flags.Int("--port", &port).Parse(args)
+	if err != nil {
+		return err
+	}
+	if port == 0 {
+		port = SERVER_PORT
+	}
+
 	wd, _ := os.Getwd()
 
-	addr := getServerAddr()
+	addr := getServerAddrWithPort(port)
 	resp, err := http.Get(fmt.Sprintf("http://%s/?workingDir=%s", addr, url.QueryEscape(wd)))
 	if err != nil {
 		// if is connection refused, ask the client to retry again in 10 seconds, this retry could be repeated up to 10 times
@@ -252,7 +261,11 @@ func handleRequest(h *serveHandler, w http.ResponseWriter, r *http.Request, idle
 }
 
 func getServerAddr() string {
-	return fmt.Sprintf("localhost:%d", SERVER_PORT)
+	return getServerAddrWithPort(SERVER_PORT)
+}
+
+func getServerAddrWithPort(port int) string {
+	return fmt.Sprintf("localhost:%d", port)
 }
 
 func isAddrReachable(addr string) bool {
