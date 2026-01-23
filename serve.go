@@ -3,10 +3,8 @@ package main
 import (
 	"context"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -28,45 +26,6 @@ const (
 	// TIMEOUT = 1 * time.Second
 	// TIMEOUT = 5 * time.Second // for testing
 )
-
-func handleClient(args []string) error {
-	var port int
-	args, err := flags.Int("--port", &port).Parse(args)
-	if err != nil {
-		return err
-	}
-	if port == 0 {
-		port = SERVER_PORT
-	}
-
-	wd, _ := os.Getwd()
-
-	addr := getServerAddrWithPort(port)
-	resp, err := http.Get(fmt.Sprintf("http://%s/?workingDir=%s", addr, url.QueryEscape(wd)))
-	if err != nil {
-		// if is connection refused, ask the client to retry again in 10 seconds, this retry could be repeated up to 10 times
-		// check if the server is running
-		if !isAddrReachable(addr) {
-			// this is a way to tell LLM that it should wait user to spin the server up
-			return fmt.Errorf("the server is busy, please `sleep 10` and try again. This retry could be repeated up to 10 times")
-		}
-		return fmt.Errorf("failed to connect to server (is it running?): %v\nStart server with: whats_next serve", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("server returned status: %d", resp.StatusCode)
-	}
-
-	// Read and display the response from server
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("failed to read response: %v", err)
-	}
-
-	fmt.Print(string(body))
-	return nil
-}
 
 func handleServer(args []string) error {
 	var logFlag bool

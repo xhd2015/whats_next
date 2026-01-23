@@ -24,15 +24,15 @@ func handleWhatsNext(args []string) error {
 	}
 
 	// If mode is server, delegate to server mode handler
-	if config.Mode == ModeServer {
-		return handleClient(args)
+	if config.Mode != ModeServer {
+		wd, _ := os.Getwd()
+		return createInput(os.Stdout, wd, readTerminalOptions{
+			showTimer: func() bool {
+				return true
+			},
+		})
 	}
-	wd, _ := os.Getwd()
-	return createInput(os.Stdout, wd, readTerminalOptions{
-		showTimer: func() bool {
-			return true
-		},
-	})
+	return handleClient(args)
 }
 
 // Global state for background input handling
@@ -249,7 +249,7 @@ func wrapQuestionWithGuidelines(q string, workingDir string) string {
 		}
 	}
 	if !printSelectedProfile {
-		fmt.Fprint(w, generalGuideline)
+		fmt.Fprint(w, getGeneralGuideline())
 		fmt.Fprint(w, toolCallAwareness)
 		fmt.Fprint(w, runningCommand)
 	}
@@ -258,9 +258,9 @@ func wrapQuestionWithGuidelines(q string, workingDir string) string {
 
 func isThinking() string {
 	return strings.Join([]string{
-		"The user is thinking, please execute `whats_next` again.",
+		"The user is thinking, please execute `" + GetProgramName() + "` again.",
 		"",
-		generalGuideline,
+		getGeneralGuideline(),
 	}, "\n")
 }
 

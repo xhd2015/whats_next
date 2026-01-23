@@ -14,17 +14,29 @@ import (
 	"golang.org/x/term"
 )
 
-const generalGuideline = `
-# Follow-up with ` + "`whats_next`" + `
+// GetProgramName returns the name of this program based on os.Args[0]'s base name.
+// This allows the program name to be dynamic based on how it's invoked.
+func GetProgramName() string {
+	if len(os.Args) > 0 {
+		return filepath.Base(os.Args[0])
+	}
+	return "whats_next"
+}
+
+func getGeneralGuideline() string {
+	programName := GetProgramName()
+	return `
+# Follow-up with ` + "`" + programName + "`" + `
 
 You don't need to output any summary after you finished a task.
 
-Every time you finished a task given by the user, you must always run ` + "`whats_next`" + ` in the terminal verbatim(don't use +` + "`echo`" + `). User will type his follow-up in the terminal, and you MUST repeat that follow-up yourself, and then proceed.
+Every time you finished a task given by the user, you must always run ` + "`" + programName + "`" + ` in the terminal verbatim(don't use +` + "`echo`" + `). User will type his follow-up in the terminal, and you MUST repeat that follow-up yourself, and then proceed.
 
 You will only end the conversation when user type 'exit'. Never ask if the user would like to proceed, just do it.
 
-Before calling ` + "`whats_next`" + `, you must show the number of tool calls you've used so far.
+Before calling ` + "`" + programName + "`" + `, you must show the number of tool calls you've used so far.
 `
+}
 
 // the output is something like:
 //
@@ -106,8 +118,9 @@ dump the prompt in markdown format, you need to replace three-backquote with COD
 ` + "```" + `
 `
 
-const help = `
-whats_next [command]
+func getHelp() string {
+	return `
+` + GetProgramName() + ` [command]
 
 Commands:
   show
@@ -131,6 +144,7 @@ Sub commands for group:
   rm, remove
   mv, rename
 `
+}
 
 func main() {
 	err := handleCommands(os.Args[1:])
@@ -192,7 +206,7 @@ func show(args []string) error {
 }
 
 func showW(w io.Writer) error {
-	fmt.Fprintln(w, strings.TrimPrefix(generalGuideline, "\n"))
+	fmt.Fprintln(w, strings.TrimPrefix(getGeneralGuideline(), "\n"))
 
 	fmt.Fprintln(w, strings.TrimPrefix(toolCallAwareness, "\n"))
 
@@ -396,7 +410,7 @@ func getEditor(editor string) string {
 }
 
 func handleHelp(args []string) error {
-	fmt.Print(strings.TrimPrefix(help, "\n"))
+	fmt.Print(strings.TrimPrefix(getHelp(), "\n"))
 	return nil
 }
 
@@ -527,18 +541,20 @@ func getGroupNames(groupDir string) ([]string, error) {
 	return result, nil
 }
 
-const addHelp = `
-whats_next add [content]
+func getAddHelp() string {
+	return `
+` + GetProgramName() + ` add [content]
 
 Options:
   --title TITLE
 
 `
+}
 
 func add(args []string) error {
 	var title string
 	args, readErr := flags.String("--title", &title).
-		Help("-h,--help", addHelp).
+		Help("-h,--help", getAddHelp()).
 		Parse(args)
 	if readErr != nil {
 		return readErr
