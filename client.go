@@ -3,86 +3,15 @@ package main
 import (
 	"fmt"
 	"io"
+	"math/rand"
 	"net/http"
 	"net/url"
 	"os"
-	"os/signal"
-	"path/filepath"
-	"syscall"
+	"strings"
 	"time"
 
 	"github.com/xhd2015/less-gen/flags"
 )
-
-type clientLogger struct {
-	file *os.File
-}
-
-func newClientLogger() (*clientLogger, error) {
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get home dir: %v", err)
-	}
-	logPath := filepath.Join(homeDir, ".whats_next.log")
-	f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open log file: %v", err)
-	}
-	return &clientLogger{file: f}, nil
-}
-
-func (l *clientLogger) Close() error {
-	if l.file != nil {
-		return l.file.Close()
-	}
-	return nil
-}
-
-func (l *clientLogger) timestamp() string {
-	return time.Now().Format("2006-01-02 15:04:05")
-}
-
-func (l *clientLogger) Log(format string, args ...interface{}) {
-	if l.file == nil {
-		return
-	}
-	msg := fmt.Sprintf(format, args...)
-	fmt.Fprintf(l.file, "[%s] %s\n", l.timestamp(), msg)
-}
-
-func (l *clientLogger) LogStdout(msg string) {
-	if l.file == nil {
-		return
-	}
-	fmt.Fprintf(l.file, "[%s] [stdout] %s\n", l.timestamp(), msg)
-}
-
-func (l *clientLogger) LogStderr(msg string) {
-	if l.file == nil {
-		return
-	}
-	fmt.Fprintf(l.file, "[%s] [stderr] %s\n", l.timestamp(), msg)
-}
-
-func (l *clientLogger) LogSignal(sig os.Signal) {
-	if l.file == nil {
-		return
-	}
-	fmt.Fprintf(l.file, "[%s] [signal] received signal: %v\n", l.timestamp(), sig)
-}
-
-func setupSignalHandler(logger *clientLogger) {
-	if logger == nil {
-		return
-	}
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT)
-	go func() {
-		for sig := range sigChan {
-			logger.LogSignal(sig)
-		}
-	}()
-}
 
 func handleClient(args []string) error {
 	logger, err := newClientLogger()
@@ -112,13 +41,60 @@ func handleClient(args []string) error {
 		logger.Log("client: dir=%s, request to port %d, pid=%d", wd, port, pid)
 	}
 
+	logf := func(format string, args ...interface{}) {
+		dateTime :="["+ time.Now().Format("2006-01-02T15:04:05") +"]"
+		fmt.Printf(dateTime + " " + format + "\n", args...)
+	}
+
 	startTime := time.Now()
 	addr := getServerAddrWithPort(port)
+	if !isAddrReachable(addr) {
+		for i := 0; i < 10; i++ {
+			logf("waiting for server to be ready...")
+			time.Sleep(10 * time.Second)
+			if isAddrReachable(addr) {
+				break
+			}
+		}
+	}
 
+	hints := []string{
+		"User is typing...",
+		"User is thinking...",
+		"User is checking the code...",
+		"User is debugging...",
+		"User is reviewing the code...",
+		"User is reading the doc...",
+		"User is building the project...",
+		"User is running the tests...",
+		"User is fixing the tests...",
+		"User is updating the CHANGELOG...",
+	}
+	randHint := func() string {
+		return hints[rand.Intn(len(hints))]
+	}
+
+	done := make(chan struct{})
+	go func() {
+		for {
+			// between 5-30s
+			randSec := rand.Intn(25) + 5
+
+			select {
+			case <-done:
+				logf("User done thinking.")
+				return
+			case <-time.After(time.Duration(randSec) * time.Second):
+				hint := randHint()
+				logf(hint)
+			}
+		}
+	}()
 	params := make(url.Values)
 	params.Set("workingDir", wd)
 	params.Set("programName", GetProgramName())
 	resp, err := http.Get(fmt.Sprintf("http://%s/?%s", addr, params.Encode()))
+	close(done)
 	if err != nil {
 		errMsg := ""
 		// if is connection refused, ask the client to retry again in 10 seconds, this retry could be repeated up to 10 times
@@ -167,6 +143,12 @@ func handleClient(args []string) error {
 		logger.LogStdout(reply)
 	}
 
+	reply = replaceWhatsNextWithProgramName(reply)
+
 	fmt.Print(reply)
 	return nil
+}
+
+func replaceWhatsNextWithProgramName(reply string) string {
+	return strings.ReplaceAll(reply, "`whats_next`", "`" + GetProgramName() + "`")
 }
