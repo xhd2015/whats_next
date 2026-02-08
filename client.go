@@ -13,6 +13,13 @@ import (
 	"github.com/xhd2015/less-gen/flags"
 )
 
+type ReplyStyle string
+
+const (
+	ReplyStyleUser ReplyStyle = "user"
+	ReplyStyleBuild ReplyStyle = "build"
+)
+
 func handleClient(args []string) error {
 	logger, err := newClientLogger()
 	if err != nil {
@@ -46,6 +53,10 @@ func handleClient(args []string) error {
 		fmt.Printf(dateTime + " " + format + "\n", args...)
 	}
 
+	logfNoTime := func(format string, args ...interface{}) {
+		fmt.Printf(format + "\n", args...)
+	}
+
 	startTime := time.Now()
 	addr := getServerAddrWithPort(port)
 	if !isAddrReachable(addr) {
@@ -58,38 +69,12 @@ func handleClient(args []string) error {
 		}
 	}
 
-	hints := []string{
-		"User is typing...",
-		"User is thinking...",
-		"User is checking the code...",
-		"User is debugging...",
-		"User is reviewing the code...",
-		"User is reading the doc...",
-		"User is building the project...",
-		"User is running the tests...",
-		"User is fixing the tests...",
-		"User is updating the CHANGELOG...",
-	}
-	randHint := func() string {
-		return hints[rand.Intn(len(hints))]
-	}
-
 	done := make(chan struct{})
-	go func() {
-		for {
-			// between 5-30s
-			randSec := rand.Intn(25) + 5
-
-			select {
-			case <-done:
-				logf("User done thinking.")
-				return
-			case <-time.After(time.Duration(randSec) * time.Second):
-				hint := randHint()
-				logf(hint)
-			}
-		}
-	}()
+	startHintLoop(ReplyStyleBuild, options{
+		logf: logf,
+		logfNoTime: logfNoTime,
+		done: done,
+	})
 	params := make(url.Values)
 	params.Set("workingDir", wd)
 	params.Set("programName", GetProgramName())
@@ -150,5 +135,124 @@ func handleClient(args []string) error {
 }
 
 func replaceWhatsNextWithProgramName(reply string) string {
-	return strings.ReplaceAll(reply, "`whats_next`", "`" + GetProgramName() + "`")
+	return strings.ReplaceAll(reply, "`whats_next`", "`"+GetProgramName()+"`")
+}
+
+type options struct {
+	logf func(format string, args ...interface{})
+	logfNoTime func(format string, args ...interface{})
+	done chan struct{}
+}
+
+func startHintLoop(style ReplyStyle, opts options) {
+	if style == ReplyStyleBuild {
+		go runBuildHintLoop(opts)
+	} else {
+		go runUserHintLoop(opts)
+	}
+}
+
+func runUserHintLoop(opts options) {
+	hints := []string{
+		"User is typing...",
+		"User is thinking...",
+		"User is checking the code...",
+		"User is debugging...",
+		"User is reviewing the code...",
+		"User is reading the doc...",
+		"User is building the project...",
+		"User is running the tests...",
+		"User is fixing the tests...",
+		"User is updating the CHANGELOG...",
+	}
+	randHint := func() string {
+		return hints[rand.Intn(len(hints))]
+	}
+
+	for {
+		// between 5-30s
+		randSec := rand.Intn(25) + 5
+
+		select {
+		case <-opts.done:
+			opts.logf("User done thinking.")
+			return
+		case <-time.After(time.Duration(randSec) * time.Second):
+			hint := randHint()
+			opts.logf(hint)
+		}
+	}
+}
+
+func runBuildHintLoop(opts options) {
+	buildSteps := []struct {
+		name    string
+		percent int
+	}{
+		{"Reading files", 0},
+		{"Parsing configuration", 2},
+		{"Build Dependency github.com/gin-gonic/gin", 5},
+		{"Build Dependency github.com/stretchr/testify", 10},
+		{"Build Dependency github.com/spf13/cobra", 15},
+		{"Build Dependency github.com/spf13/viper", 20},
+		{"Build Dependency google.golang.org/grpc", 28},
+		{"Build Dependency google.golang.org/protobuf", 35},
+		{"Build Dependency github.com/go-redis/redis", 42},
+		{"Build Dependency github.com/jackc/pgx", 50},
+		{"Build Dependency github.com/aws/aws-sdk-go", 58},
+		{"Compiling internal packages", 65},
+		{"Compiling main package", 72},
+		{"Linking dependencies", 80},
+		{"Generating binary", 88},
+		{"Running post-build hooks", 90},
+		{"Verifying checksums", 91},
+		{"Optimizing binary", 92},
+		{"Stripping debug symbols", 93},
+		{"Compressing assets", 94},
+		{"Generating metadata", 95},
+		{"Updating cache", 96},
+		{"Cleaning temp files", 97},
+		{"Writing output", 98},
+		{"Finalizing build", 99},
+	}
+
+	stepIndex := 0
+	finalPercent := 99.0 // Track progress after reaching 99%
+	for {
+		select {
+		case <-opts.done:
+			opts.logfNoTime("Build completed.")
+			return
+		case <-time.After(time.Duration(rand.Intn(16)+5) * time.Second):
+			step := buildSteps[stepIndex]
+
+			if stepIndex < len(buildSteps)-1 {
+				// Normal steps: show integer percent
+				opts.logfNoTime("%s... %d%%", step.name, step.percent)
+				stepIndex++
+			} else {
+				// Final step (99%): show incremental decimal progress
+				// Format with varying precision to look natural
+				var percentStr string
+				if finalPercent == 99.0 {
+					percentStr = "99"
+				} else if finalPercent < 99.1 {
+					percentStr = fmt.Sprintf("%.2f", finalPercent)
+				} else {
+					percentStr = fmt.Sprintf("%.1f", finalPercent)
+				}
+				opts.logfNoTime("%s... %s%%", step.name, percentStr)
+
+				// Increment by a small random amount (0.01 to 0.15), but never reach 100
+				increment := 0.01 + rand.Float64()*0.14
+				if finalPercent+increment >= 100.0 {
+					increment = 0.01 // Tiny increment if close to 100
+				}
+				finalPercent += increment
+				if finalPercent >= 99.99 {
+					finalPercent = 99.99 // Cap at 99.99
+				}
+			}
+		}
+	}
 }

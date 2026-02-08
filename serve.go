@@ -30,9 +30,11 @@ const (
 func handleServer(args []string) error {
 	var logFlag bool
 	var kill bool
+	var port int = SERVER_PORT
 	args, err := flags.
 		Bool("--log", &logFlag).
 		Bool("--kill", &kill).
+		Int("--port", &port).
 		Parse(args)
 	if err != nil {
 		return err
@@ -48,7 +50,7 @@ func handleServer(args []string) error {
 		}
 		defer closeLoggers()
 	}
-	serverAddr := getServerAddr()
+	serverAddr := getServerAddrWithPort(port)
 	if kill {
 		// get to /kill and send a POST request
 		resp, err := http.Get(fmt.Sprintf("http://%s/kill", serverAddr))
@@ -120,7 +122,7 @@ func handleServer(args []string) error {
 		}
 	})
 
-	fmt.Printf("Starting server on port %d...", SERVER_PORT)
+	fmt.Printf("Starting server on port %d...", port)
 	serverErr := server.ListenAndServe()
 	if h.isShutdownRequested() {
 		return nil
@@ -217,10 +219,6 @@ func handleRequest(h *serveHandler, w http.ResponseWriter, r *http.Request, idle
 	}
 
 	Logf("Client request finished")
-}
-
-func getServerAddr() string {
-	return getServerAddrWithPort(SERVER_PORT)
 }
 
 func getServerAddrWithPort(port int) string {
